@@ -1,0 +1,8 @@
+[build]
+# i686, msvc 타겟만 작동함
+target = "i686-pc-windows-msvc"
+
+[target.i686-pc-windows-msvc]
+# https://github.com/strickczq/msvc-wsl-rust
+# i686-pc-windows-msvc를 타겟으로 할 수 있는 스크립트이고, path나 msvc version 같은 부분들은 고쳐서 써야 함
+linker = "../../msvc-linker/linker-x86.sh"

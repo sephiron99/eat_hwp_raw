@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN"
+	"http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+
+<html xmlns="http://www.w3.org/1999/xhtml">
+
+<head>
+<title>eat_hwp_raw.html&lt;2&gt;</title>
+<meta http-equiv="Content-Type" content="application/xhtml+xml;charset=utf-8"/>
+<link rel="stylesheet" type="text/css" media="all" href="https://cdn.jsdelivr.net/npm/github-markdown-css/github-markdown.min.css"  />
+<link rel="stylesheet" type="text/css" media="all" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release/build/styles/github.min.css"  /><meta name='viewport' content='width=device-width, initial-scale=1, shrink-to-fit=no'><style> body { box-sizing: border-box; max-width: 740px; width: 100%; margin: 40px auto; padding: 0 10px; } </style><script id='MathJax-script' async src='https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js'></script><script src='https://cdn.jsdelivr.net/gh/highlightjs/cdn-release/build/highlight.min.js'></script><script>document.addEventListener('DOMContentLoaded', () => { document.body.classList.add('markdown-body'); document.querySelectorAll('pre[lang] > code').forEach((code) => { code.classList.add(code.parentElement.lang); }); document.querySelectorAll('pre > code').forEach((code) => { hljs.highlightBlock(code); }); });</script>
+</head>
+
+<body>
+
+<h1 id="hwp-ai-agent">Hwp Ai Agent</h1>
+<p>LLM이 현재 HWP Document의 양식과 내용, 기초자료를 바탕으로 문서를 작성하거나
+수정하는 HWP AI AGENT.</p>
+<h2 id="features">Features</h2>
+<ol>
+<li>현재 XHwpDocument의 양식(제목, 소제목, 글꼴, 문단모양)을 이해하고, 최대한 준수한다.</li>
+<li>내용을 작성할 때에는 문단의 직전, 직후 문단에 기재된 제목/소제목(문서 양식마다 1~4개의 레벨이 존재한다)에 상응하도록 내용을 작성한다.</li>
+<li>별도의 GUI를 통해 제공되는 파일(hwp 등, Retrieval-Augmented Generation)들에 기재된 사실/근거들을 바탕으로, 사용자가 원하는 내용을 제시한다.</li>
+<li>양식 준수의 기준 우선순위<ol>
+<li>줄 수</li>
+<li>줄간격, 문단여백</li>
+<li>자간</li>
+</ol>
+</li>
+<li>사용자의 스타일을 학습하여 출력을 최적화하는 기능<ul>
+<li>제목/소제목 문단을 수정/완성할 때에는 직후 문단을 참고하여 1줄 이내로 입력 또는 수정한다.</li>
+<li>별도 모드가 아니라 커서의 컨텍스트가 제목/소제목/본문이라는 정보를 프롬프트에 추가하는 기능</li>
+</ul>
+</li>
+<li>LLM Local or remote Server(nvidia spark dgx 등)를 지원</li>
+<li>Claude api, Gemini api는 추후지원으로 일단 설계에만 반영</li>
+</ol>
+<h2 id="workflow_a">Workflow_A</h2>
+<ol>
+<li>사용자가 문단에 프롬프트 입력(생략가능) </li>
+<li>사용자가 eat_hwp_raw 호출하는 addon의 <code>버튼1</code> 클릭</li>
+<li>eat_hwp_raw GUI 팝업(별도 프로세스)</li>
+<li>eat_hwp_raw는 hwp_automation_rs로 현재 컨텍스트(커서위치, 블록 정보 등) 확보</li>
+<li>SaveAs로 TMP 디렉토리에 hwpx 저장 후 hwp사용자는 기존 문서 작업 계속, 또는 별개의 Workflow 실행 가능</li>
+<li>eat_hwp_raw GUI에 자유롭게 프롬프트 입력 및 commit</li>
+<li>eat_hwp_raw는 TMP에 저장된 hwpx 파싱하고, 프롬프트에 따라 결과 생성</li>
+<li>처리완료 알람 팝업</li>
+<li>알람을 클릭하면, 결과물을 새 hwp window에 아까 확보되었던 hwp 컨텍스트대로
+형식을 맞춰서 insertText 등으로 입력</li>
+</ol>
+<h2 id="workflow_c">Workflow_C</h2>
+<ol>
+<li>사용자가 문단에 프롬프트 입력(생략가능)</li>
+<li>사용자가 eat_hwp_raw 호출하는 addon의 <code>버튼1</code> 클릭</li>
+<li>eat_hwp_raw GUI 팝업(별도 프로세스)</li>
+<li>eat_hwp_raw는 hwp_automation_rs로 현재 문서의 모든 문단의 컨텍스트(텍스트, 글꼴, 문단모양 등) 확보<ul>
+<li>hwp_automation_rs의 current_char_shape() 사용</li>
+<li>전체 문서를 iterate하여 컨텍스트를 문단별로 구성</li>
+<li>문단별 hierarchy를 제공된 양식파일, 글자크기, 글꼴, 구조, 내용, 줄수 등을
+종합하여 컨테이너(Vec, Set 또는 기타 자료형)에 수납</li>
+<li>커서위치, 블록 정보 등은 별도 구조체에 수납</li>
+</ul>
+</li>
+<li>eat_hwp_raw GUI에 자유롭게 프롬프트 입력 및 commit<ul>
+<li>사용자 프롬프트가 생략되었을 경우, 디폴트 프롬프트 실행</li>
+</ul>
+</li>
+<li>eat_hwp_raw는 TMP에 저장된 hwpx 파싱하고, 프롬프트에 따라 결과 생성</li>
+<li>처리완료 알람 팝업</li>
+<li>알람을 클릭하면, 결과물을 새 hwp window에 아까 확보되었던 hwp 컨텍스트대로</li>
+</ol>
+<h2 id="eat_hwp_raw-gui">eat_hwp_raw GUI</h2>
+<ol>
+<li>현재문단/전체문서를 컨텍스트로 지정할 수 있는 check button</li>
+<li>프롬프트 textarea</li>
+<li>commit 버튼</li>
+<li>etc</li>
+</ol>
+
+
+</body>
+</html>
