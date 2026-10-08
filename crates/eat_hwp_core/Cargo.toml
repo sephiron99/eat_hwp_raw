@@ -1,0 +1,25 @@
+[package]
+name = "eat_hwp_core"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "eat_hwp_core"
+
+[dependencies]
+# 한글(HWP) COM 자동화 (CLAUDE.md Dependencies)
+hwp_com = { path = "../../../hwp_automation_rs/crates/hwp_com" }
+hwp_core = { path = "../../../hwp_automation_rs/crates/hwp_core" }
+# hwpx 파서 (GetTextFile 금지 → SaveAs hwpx 후 파싱)
+hwpers = { path = "../../../hwpers" }
+# 오류 처리
+anyhow = "1"
+# LLM 백엔드 (OpenAI 호환 로컬/원격 엔드포인트).
+# 기본 features의 rustls는 ring/aws-lc(C 코드)를 끌어와 i686-pc-windows-msvc 크로스 빌드에서
+# 실패하므로, Windows에서 schannel(순수 Rust)을 쓰는 native-tls로 교체한다.
+rig = { package = "rig-core", version = "0.44", default-features = false, features = ["derive", "reqwest", "native-tls"] }
+# rig는 async → sync LlmBackend::complete 내부에서 block_on하기 위한 런타임.
+tokio = { version = "1", features = ["rt-multi-thread"] }
+# Windows GUI 셸 (CLAUDE.md Dependencies)
+winsafe = { version = "0.0.29", features = ["gui"] }

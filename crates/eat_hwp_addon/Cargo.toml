@@ -1,0 +1,29 @@
+[package]
+name = "eat_hwp_addon"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "eat_hwp_addon"
+# 한글이 LoadLibrary로 로드하는 C 호환 표준 Windows DLL. rundll32도 같은 DLL을 로드해 GUI 실행.
+crate-type = ["cdylib"]
+
+[dependencies]
+# 애드인 프레임워크(HwpUserAction 트레이트 + export_hwp_addon! 매크로).
+# CLAUDE.md 경계: 애드온 로직은 eat_hwp_raw 소속, hwp_addon은 의존성으로만 사용한다.
+hwp_addon = { path = "../../../hwp_automation_rs/crates/hwp_addon" }
+hwp_core = { path = "../../../hwp_automation_rs/crates/hwp_core" }
+# 통합 GUI. 별도 실행파일 없이 이 DLL을 rundll32가 독립 프로세스로 띄운다.
+eat_hwp_core = { path = "../eat_hwp_core" }
+
+# 단축키 키코드(VK_OEM_6 = ']') + 자기 DLL 경로 조회(GetModuleHandleEx/GetModuleFileNameW,
+# 공백 회피용 8.3 short path). FFI export(RunGuiW)와 함께 본 크레이트엔 최소 unsafe가 있다.
+[dependencies.windows]
+version = "0.62.2"
+features = [
+    "Win32_Foundation",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_LibraryLoader",
+    "Win32_Storage_FileSystem",
+]

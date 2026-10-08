@@ -5,4 +5,13 @@ target = "i686-pc-windows-msvc"
 [target.i686-pc-windows-msvc]
 # https://github.com/strickczq/msvc-wsl-rust
 # i686-pc-windows-msvc를 타겟으로 할 수 있는 스크립트이고, path나 msvc version 같은 부분들은 고쳐서 써야 함
-linker = "../../msvc-linker/linker-x86.sh"
+linker = "../msvc-linker/linker-x86.sh"
+# winsafe 0.0.27 x86(stdcall) 버그 우회: 아래 3개 FFI 선언의 인자 개수가 틀려(@N 데코 불일치)
+# x86 임포트 라이브러리에서 미해결됨(x64는 @N이 없어 무사). 우리 앱은 이 함수들을 호출하지 않으므로
+# 실제 export로 별칭만 연결해 링크를 통과시킨다. GetClassLongPtrW→GetClassLongW는 x86에서 의미도 동일.
+#   ImageList_DrawIndirect@8→@4, ImageList_DragMove@12→@8, GetClassLongPtrW@8→GetClassLongW@8
+rustflags = [
+    "-C", "link-arg=/ALTERNATENAME:__imp__GetClassLongPtrW@8=__imp__GetClassLongW@8",
+    "-C", "link-arg=/ALTERNATENAME:__imp__ImageList_DrawIndirect@8=__imp__ImageList_DrawIndirect@4",
+    "-C", "link-arg=/ALTERNATENAME:__imp__ImageList_DragMove@12=__imp__ImageList_DragMove@8",
+]
