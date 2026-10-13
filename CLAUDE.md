@@ -25,10 +25,10 @@ cargo check
 종료돼도 GUI 생존). `cargo build`가 워크스페이스 전체를 빌드하며 산출물은
 `target/i686-pc-windows-msvc/debug/eat_hwp_addon.dll` 하나다.
 ### unsafe policy
-앱 로직 크레이트 `crates/eat_hwp_core`(lib) 루트에 `#![forbid(unsafe_code)]` 적용.
-`crates/eat_hwp_addon`(cdylib)은 FFI export(`RunGuiW`)와 자기 DLL 경로 조회 때문에 최소 unsafe가
-필요해 forbid를 두지 않는다(unsafe는 self-path 조회 1곳으로 한정, `export_hwp_addon!` 생성분은
-매크로 정의 크레이트 소속).
+워크스페이스의 모든 크레이트(`crates/eat_hwp_core`, `crates/eat_hwp_addon`) 루트에
+`#![forbid(unsafe_code)]` 적용. DLL export(`QueryUserActionInterface`, `RunGuiW`)는 `hwp_addon`의
+`export_hwp_addon!`/`export_rundll_entry!` 매크로로 생성하고, Win32 호출은 WinSafe의 safe 래퍼를 쓴다.
+unsafe가 필요한 기능은 이 프로젝트에 두지 않고 hwp_automation_rs에 추가하도록 제시한다.
 
 ## Dependencies
 1. 백엔드는 [rig-rs](https://docs.rig.rs/)

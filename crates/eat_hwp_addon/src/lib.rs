@@ -9,16 +9,18 @@
 //! (`eat_hwp_core::run_gui`)가 실행된다. Windows는 부모(HWP) 종료 시 자식을 강제 종료하지
 //! 않으므로(추가로 `CREATE_BREAKAWAY_FROM_JOB` 시도) GUI는 독립적으로 유지된다.
 //!
-//! 본 크레이트는 FFI export(`RunGuiW`)와 자기 DLL 경로 조회 때문에 unsafe가 필요하므로
-//! 크레이트 루트 `#![forbid(unsafe_code)]`를 두지 않는다(앱 로직은 `eat_hwp_core`에서 forbid 유지).
+//! 크레이트 루트에 `#![forbid(unsafe_code)]`를 둔다. DLL export(`QueryUserActionInterface`,
+//! `RunGuiW`)는 `hwp_addon`의 `export_hwp_addon!`/`export_rundll_entry!` 매크로가 생성한다.
 //! `hwp_addon`/`eat_hwp_core`는 의존성으로만 사용한다(CLAUDE.md 경계).
+
+#![forbid(unsafe_code)]
 
 use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Command;
 
 use hwp_addon::debug::{log, msgbox_err};
-use hwp_addon::export_hwp_addon;
+use hwp_addon::{export_hwp_addon, export_rundll_entry};
 use hwp_addon::hwp_user_action::{ActionMeta, HwpUserAction, ToolbarConfig, ToolbarTarget};
 use hwp_addon::shortcut::{Modifiers, ShortcutKey};
 use hwp_core::error::Result;
@@ -30,6 +32,9 @@ const TOOLBAR_DATA: &[u8] = include_bytes!("../toolbar.bmp");
 
 /// 액션 식별자.
 const ACTION_LAUNCH: &str = "LaunchEatHwpRaw";
+
+/// 이 DLL의 파일 이름(cargo 산출물 이름).
+const SELF_DLL_NAME: &str = concat!(env!("CARGO_PKG_NAME"), ".dll");
 
 /// rundll32가 호출할 export 이름.
 const RUNDLL_ENTRY: &str = "RunGuiW";
@@ -102,12 +107,9 @@ impl HwpUserAction for EatHwpLauncher {
 
 // ── rundll32 진입점 (독립 프로세스에서 실행됨) ──
 
-/// `rundll32.exe eat_hwp_addon.dll,RunGuiW` 로 호출되는 진입점. 통합 GUI를 실행한다.
-///
-/// rundll32 콜백 규약: `void CALLBACK EntryW(HWND, HINSTANCE, LPWSTR, int)`.
+/// `rundll32.exe eat_hwp_addon.dll,RunGuiW` 로 호출되는 진입점의 본체. 통합 GUI를 실행한다.
 /// 콘솔이 없으므로 오류는 메시지 박스로 표시한다.
-#[unsafe(no_mangle)]
-pub extern "system" fn RunGuiW(_hwnd: isize, _hinst: isize, _cmdline: *const u16, _show: i32) {
+fn run_gui_entry() {
     log("eat_hwp_addon", "RunGuiW 진입 — 독립 프로세스에서 GUI 시작");
     if let Err(e) = eat_hwp_core::run_gui() {
         msgbox_err("eat_hwp_raw GUI", &format!("{e:?}"));
@@ -122,12 +124,14 @@ pub extern "system" fn RunGuiW(_hwnd: isize, _hinst: isize, _cmdline: *const u16
 fn launch_gui_process() -> std::result::Result<(), String> {
     let dll = self_dll_path().ok_or_else(|| "자기 DLL 경로 조회 실패".to_string())?;
     let rundll = rundll32_path();
-    let entry = format!("{},{RUNDLL_ENTRY}", dll.display());
+    // rundll32는 콤마 앞 경로에 공백이 있으면 파싱이 깨지므로 경로를 따옴표로 감싼다.
+    // `arg`는 인자 전체를 다시 인용하므로 `raw_arg`로 그대로 전달한다.
+    let entry = format!("\"{}\",{RUNDLL_ENTRY}", dll.display());
     log("eat_hwp_addon", &format!("spawn: {} {}", rundll.display(), entry));
 
     let spawn = |flags: u32| {
         Command::new(&rundll)
-            .arg(&entry)
+            .raw_arg(&entry)
             .creation_flags(flags)
             .spawn()
     };
@@ -150,45 +154,13 @@ fn rundll32_path() -> PathBuf {
     PathBuf::from("rundll32.exe")
 }
 
-/// 현재 DLL의 전체 경로(공백 없는 8.3 short path).
-/// rundll32는 콤마 앞 경로에 공백이 있으면 파싱이 깨지므로 short path로 변환한다.
-/// 본 DLL 안의 함수 주소(`RunGuiW`)로 자기 모듈 핸들을 얻고 경로를 조회한다.
+/// 현재 DLL의 전체 경로. 로드된 모듈 중 이 DLL의 파일 이름(`SELF_DLL_NAME`)으로 핸들을 찾는다.
+/// 빌드 산출물의 파일 이름을 바꿔 등록하면 찾지 못한다.
 fn self_dll_path() -> Option<PathBuf> {
-    use windows::Win32::Foundation::HMODULE;
-    use windows::Win32::Storage::FileSystem::GetShortPathNameW;
-    use windows::Win32::System::LibraryLoader::{
-        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-        GetModuleFileNameW, GetModuleHandleExW,
-    };
-    use windows::core::PCWSTR;
-
-    unsafe {
-        let mut hmod = HMODULE::default();
-        let marker = RunGuiW as *const () as *const u16;
-        GetModuleHandleExW(
-            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-            PCWSTR(marker),
-            &mut hmod,
-        )
-        .ok()?;
-
-        let mut buf = [0u16; 1024];
-        let n = GetModuleFileNameW(Some(hmod), &mut buf) as usize;
-        if n == 0 || n >= buf.len() {
-            return None;
-        }
-        let long = &buf[..n];
-
-        // short path 변환(공백 제거). 실패(8.3 비활성 등)하면 long path 그대로.
-        let mut short = [0u16; 1024];
-        let m = GetShortPathNameW(PCWSTR(long.as_ptr()), Some(&mut short)) as usize;
-        let slice = if m == 0 || m >= short.len() {
-            long
-        } else {
-            &short[..m]
-        };
-        Some(PathBuf::from(String::from_utf16_lossy(slice)))
-    }
+    let hmod = winsafe::HINSTANCE::GetModuleHandle(Some(SELF_DLL_NAME)).ok()?;
+    hmod.GetModuleFileName().ok().map(PathBuf::from)
 }
 
 export_hwp_addon!(EatHwpLauncher, EatHwpLauncher);
+// `RUNDLL_ENTRY`와 같은 이름으로 export한다.
+export_rundll_entry!(RunGuiW, run_gui_entry);

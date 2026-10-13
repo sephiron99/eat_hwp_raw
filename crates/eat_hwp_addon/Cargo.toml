@@ -17,13 +17,13 @@ hwp_core = { path = "../../../hwp_automation_rs/crates/hwp_core" }
 # 통합 GUI. 별도 실행파일 없이 이 DLL을 rundll32가 독립 프로세스로 띄운다.
 eat_hwp_core = { path = "../eat_hwp_core" }
 
-# 단축키 키코드(VK_OEM_6 = ']') + 자기 DLL 경로 조회(GetModuleHandleEx/GetModuleFileNameW,
-# 공백 회피용 8.3 short path). FFI export(RunGuiW)와 함께 본 크레이트엔 최소 unsafe가 있다.
+# 자기 DLL 경로 조회(GetModuleHandle/GetModuleFileName의 safe 래퍼).
+winsafe = { version = "0.0.29", features = ["kernel"] }
+
+# 단축키 키코드(VK_OEM_6 = ']').
 [dependencies.windows]
 version = "0.62.2"
 features = [
     "Win32_Foundation",
     "Win32_UI_Input_KeyboardAndMouse",
-    "Win32_System_LibraryLoader",
-    "Win32_Storage_FileSystem",
 ]
