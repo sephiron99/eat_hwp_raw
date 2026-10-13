@@ -35,7 +35,8 @@ unsafe가 필요한 기능은 이 프로젝트에 두지 않고 hwp_automation_r
 1. Windows GUI는 [WinSafe](https://docs.rs/winsafe/latest/winsafe/gui/index.html) 
 1. [hwp_automation_rs](https://github.com/sephiron99/hwp_automation_rs) 에서 hwp_com을 기반으로 작성하되, 필요할 때에는 hwp_addon도 사용한다.
 1. Windows 10 이상 전용
-1. 문서 내용: `GetTextFile`(`GetTextFileFormat::HwpMl2X`)로 HWPML 문자열을 받아 [roxmltree](https://docs.rs/roxmltree)로 파싱
+1. 문서 내용: `GetTextFile`(`GetTextFileFormat::HwpMl2X`)로 HWPML 문자열을 받아 [roxmltree](https://docs.rs/roxmltree)로 파싱.
+   커서 위치는 `HwpExt::hwpml_with_caret`이 돌려주는 HWPML 안의 바이트 위치로 찾는다(`GetPos` 번호는 쓰지 않음)
 
 ## 유의사항 및 준수사항
 1. hwp_automation_rs에 없는 hwp com/action/api는 hwp_automation_rs에 해당

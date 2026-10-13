@@ -24,23 +24,26 @@ const CONTEXT_AFTER: usize = 3;
 
 /// 문서의 HWPML과 사용자 프롬프트로 LLM 응답을 생성한다.
 ///
-/// `cursor_para`는 본문 커서 문단 인덱스(없으면 `None`). `Scope::CurrentParagraph`일 때만 쓰인다.
+/// `caret`은 `hwpml` 안에서 커서가 있는 바이트 위치(없으면 `None`). `Scope::CurrentParagraph`일
+/// 때만 쓰인다.
 pub fn run_prompt(
     _cfg: &Config,
     backend: &dyn LlmBackend,
     hwpml: &str,
     user_prompt: &str,
     scope: Scope,
-    cursor_para: Option<usize>,
+    caret: Option<usize>,
 ) -> Result<String> {
     let doc = parse::parse_hwpml(hwpml)?;
 
-    let context = match (scope, cursor_para) {
-        (Scope::CurrentParagraph, Some(center)) => {
-            current_paragraph_context(parse::paragraph_texts(&doc), center)
-        }
+    let caret_paras = match scope {
+        Scope::CurrentParagraph => caret.and_then(|at| parse::caret_paragraphs(&doc, at)),
+        Scope::WholeDocument => None,
+    };
+    let context = match caret_paras {
+        Some((paras, center)) => current_paragraph_context(&paras, center),
         // 전체 문서이거나, 커서 정보가 없는 경우(예: EAT_HWP_DOC 테스트 경로)는 전체 문서로 폴백.
-        _ => parse::document_text(&doc),
+        None => parse::document_text(&doc),
     };
 
     let prompt = build_prompt(&context, user_prompt);
@@ -50,12 +53,8 @@ pub fn run_prompt(
 /// 커서 문단과 그 직전/직후 문단을 묶어 로컬 컨텍스트를 만든다.
 ///
 /// 대상(현재) 문단은 `>>> ` 표시로 구분해 LLM이 수정/작성 대상 문단을 인지하도록 한다.
-/// (단일 섹션 문서 기준. 다중 섹션에서는 본문 문단 순서가 GetPos para와 어긋날 수 있어 인덱스를 clamp.)
-fn current_paragraph_context(paras: &[String], center: usize) -> String {
-    if paras.is_empty() {
-        return String::new();
-    }
-    let center = center.min(paras.len() - 1);
+/// `center`는 `paras` 안의 인덱스여야 한다.
+fn current_paragraph_context(paras: &[&str], center: usize) -> String {
     let start = center.saturating_sub(CONTEXT_BEFORE);
     let end = (center + CONTEXT_AFTER + 1).min(paras.len());
 
@@ -66,7 +65,7 @@ fn current_paragraph_context(paras: &[String], center: usize) -> String {
             if start + i == center {
                 format!(">>> {para}")
             } else {
-                para.clone()
+                para.to_string()
             }
         })
         .collect::<Vec<_>>()

@@ -21,8 +21,10 @@ LLM이 현재 HWP Document의 양식과 내용, 기초자료를 바탕으로 문
 1. 사용자가 문단에 프롬프트 입력(생략가능) 
 1. 사용자가 eat_hwp_raw 호출하는 addon의 `버튼1` 클릭 or 단축키 `Ctrl+]`
 1. eat_hwp_raw GUI 팝업(별도 프로세스)
-1. eat_hwp_raw는 hwp_automation_rs로 현재 컨텍스트(커서위치, 블록 정보 등) 확보
-1. GetTextFile(HWPML2X)로 현재 문서 내용을 문자열로 확보 후 hwp사용자는 기존 문서 작업 계속, 또는 별개의 Workflow 실행 가능
+1. eat_hwp_raw는 hwp_automation_rs의 `hwpml_with_caret`으로 현재 문서 내용(HWPML2X 문자열)과
+   그 안의 커서 위치를 함께 확보. 커서 자리에 책갈피를 잠깐 넣었다가 실행 취소로 되돌리는
+   방식이라 문서의 수정 상태와 다시 실행 기록이 바뀌고, 선택 블록은 풀린다(블록 정보는 미확보)
+1. 확보 후 hwp사용자는 기존 문서 작업 계속, 또는 별개의 Workflow 실행 가능
 1. eat_hwp_raw GUI에 자유롭게 프롬프트 입력 
 1. eat_hwp_raw는 확보한 HWPML을 파싱하고, 프롬프트 실행
 1. 결과물은 별도의 새 hwp 창을 띄워서 거기에 입력하되, 그 결과물에 맞는 서식을

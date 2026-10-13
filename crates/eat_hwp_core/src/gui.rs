@@ -9,7 +9,7 @@
 //! 테스트할 때는 환경변수 `EAT_HWP_DOC`에 HWPML 파일(UTF-8) 경로를 지정하면 그 파일을 사용한다.
 
 use crate::config::Config;
-use crate::hwp::{self, DocContext};
+use crate::hwp::{self, DocSnapshot};
 use crate::llm::LlmBackend;
 use crate::workflow::{self, Scope};
 use anyhow::{Result, anyhow};
@@ -201,34 +201,30 @@ fn finish_on_ui(wnd: &gui::WindowMain, result: Result<String>) {
     }
 }
 
-/// 문서 내용(HWPML)과 커서 컨텍스트를 확보해 워크플로를 실행한다.
+/// 문서 내용(HWPML)과 커서 위치를 확보해 워크플로를 실행한다.
 fn run_workflow(
     cfg: &Config,
     backend: &dyn LlmBackend,
     user_prompt: &str,
     scope: Scope,
 ) -> Result<String> {
-    let (hwpml, ctx) = acquire_hwpml()?;
-    // 본문(list 0) 커서일 때만 현재 문단 인덱스를 넘긴다. (그 외엔 전체 문서로 폴백)
-    let cursor_para = ctx.and_then(|c| c.body_paragraph_index());
-    workflow::run_prompt(cfg, backend, &hwpml, user_prompt, scope, cursor_para)
+    let doc = acquire_document()?;
+    workflow::run_prompt(cfg, backend, &doc.hwpml, user_prompt, scope, doc.caret)
 }
 
-/// 문서의 HWPML과(가능하면) 커서 컨텍스트를 확보한다.
+/// 문서의 HWPML과(가능하면) 커서 위치를 확보한다.
 ///
-/// 1) 환경변수 `EAT_HWP_DOC`가 지정되면 그 HWPML 파일을 읽는다(테스트 경로, 커서 컨텍스트 없음).
-/// 2) 아니면 실행 중인 한글에 연결 → 현재 컨텍스트(GetPos) 확보 → GetTextFile(HWPML2X).
-fn acquire_hwpml() -> Result<(String, Option<DocContext>)> {
+/// 1) 환경변수 `EAT_HWP_DOC`가 지정되면 그 HWPML 파일을 읽는다(테스트 경로, 커서 위치 없음).
+/// 2) 아니면 실행 중인 한글에 연결 → HWPML과 그 안의 커서 위치 확보.
+fn acquire_document() -> Result<DocSnapshot> {
     if let Ok(p) = std::env::var("EAT_HWP_DOC") {
         if !p.is_empty() {
-            // 테스트 경로: 기존 HWPML 파일만 사용하고 라이브 커서 컨텍스트는 없다.
+            // 테스트 경로: 기존 HWPML 파일만 사용하고 라이브 커서 위치는 없다.
             let hwpml = std::fs::read_to_string(&p)
                 .map_err(|e| anyhow!("EAT_HWP_DOC 파일을 읽지 못함: {p}: {e}"))?;
-            return Ok((hwpml, None));
+            return Ok(DocSnapshot { hwpml, caret: None });
         }
     }
     let hwp = hwp::connect()?;
-    let ctx = hwp::current_context(&hwp)?;
-    let hwpml = hwp::document_hwpml(&hwp)?;
-    Ok((hwpml, Some(ctx)))
+    hwp::document_snapshot(&hwp)
 }
