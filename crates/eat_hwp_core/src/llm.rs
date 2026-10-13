@@ -6,9 +6,10 @@
 
 use crate::config::Config;
 use anyhow::{Result, anyhow};
-use rig::client::CompletionClient;
-use rig::completion::Prompt;
-use rig::providers::openai;
+use rig::completion::{CompletionRequest, Reasoning};
+use rig::driver::Model;
+use rig::providers::openai::OpenAIConfig;
+use rig::providers::openai::wire::Chat;
 
 /// 양식 준수를 위한 기본 시스템 지침(preamble).
 /// features(eat_hwp_raw.md): 제목/소제목/문단 구조 등 문서 양식을 최대한 준수한다.
@@ -25,8 +26,7 @@ pub trait LlmBackend {
 /// rig API는 async이므로 내부에 tokio 런타임을 두고 `block_on`으로 동기 인터페이스에 맞춘다.
 pub struct RigBackend {
     runtime: tokio::runtime::Runtime,
-    client: openai::Client,
-    model: String,
+    model: Model<Chat>,
     preamble: String,
 }
 
@@ -35,17 +35,15 @@ impl RigBackend {
     pub fn new(cfg: &Config) -> Result<Self> {
         let runtime = tokio::runtime::Runtime::new()
             .map_err(|e| anyhow!("tokio 런타임 생성 실패: {e}"))?;
-        let mut builder = openai::Client::builder().api_key(&cfg.llm_api_key);
+        let mut provider = OpenAIConfig::new(cfg.llm_api_key.as_str());
         if !cfg.llm_base_url.is_empty() {
-            builder = builder.base_url(&cfg.llm_base_url);
+            provider = provider.with_base_url(cfg.llm_base_url.as_str());
         }
-        let client = builder
-            .build()
-            .map_err(|e| anyhow!("OpenAI 호환 클라이언트 생성 실패: {e}"))?;
+        // `/v1/chat/completions` 경로(Ollama/vLLM 등 OpenAI 호환 서버 공통).
+        let model = provider.client().chat(cfg.llm_model.as_str());
         Ok(Self {
             runtime,
-            client,
-            model: cfg.llm_model.clone(),
+            model,
             preamble: DEFAULT_PREAMBLE.to_string(),
         })
     }
@@ -54,15 +52,16 @@ impl RigBackend {
 impl LlmBackend for RigBackend {
     fn complete(&self, prompt: &str) -> Result<String> {
         self.runtime.block_on(async {
-            let agent = self
-                .client
-                .agent(self.model.as_str())
-                .preamble(&self.preamble)
-                .build();
-            agent
-                .prompt(prompt)
+            // 추론(thinking) 모델은 끄지 않으면 생각에 토큰을 소진해 본문이 빈 채로 온다(Gemma 4 확인).
+            let request = CompletionRequest::new(prompt)
+                .preamble(self.preamble.as_str())
+                .reasoning(Reasoning::Off);
+            let response = self
+                .model
+                .call(request)
                 .await
-                .map_err(|e| anyhow!("rig prompt 실패: {e}"))
+                .map_err(|e| anyhow!("rig 호출 실패: {e}"))?;
+            Ok(response.text())
         })
     }
 }

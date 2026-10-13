@@ -8,8 +8,9 @@
 //! - 누락 기능은 hwp_automation_rs에 추가하도록 제안한다.
 //! - `GetTextFile` 사용 금지(여기서는 호출하지 않는다).
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, anyhow};
 use hwp_com::HwpClient;
+use hwp_core::ext::HwpExt;
 use hwp_core::hwp_obj::HwpObject;
 use std::path::Path;
 
@@ -48,16 +49,12 @@ pub fn current_context(hwp: &HwpObject) -> Result<DocContext> {
 /// 현재 문서를 hwpx 포맷으로 `path`에 저장한다.
 ///
 /// CLAUDE.md 준수사항(1번)에 따라 hwp SaveAs는 hwp_automation_rs에 추가한 typed 메서드
-/// `HwpObject::save_as_hwpx(&str)`를 호출한다(VARIANT/파라미터는 eat_hwp_raw에서 직접 구성하지 않음).
+/// `HwpExt::save_as_hwpx(&str)`를 호출한다(VARIANT/파라미터는 eat_hwp_raw에서 직접 구성하지 않음).
 pub fn save_as_hwpx(hwp: &HwpObject, path: &Path) -> Result<()> {
     let path_str = path
         .to_str()
         .ok_or_else(|| anyhow!("저장 경로가 UTF-8이 아님: {}", path.display()))?;
-    let ok = hwp
-        .save_as_hwpx(path_str)
-        .map_err(|e| anyhow!("SaveAs(HWPX) 실패: {e}"))?;
-    if !ok {
-        bail!("SaveAs(HWPX)가 실패를 반환했습니다: {path_str}");
-    }
-    Ok(())
+    // 한글이 false(실패)를 돌려주면 hwp_core가 `HwpError::ExecutionFailed`로 변환한다.
+    hwp.save_as_hwpx(path_str)
+        .map_err(|e| anyhow!("SaveAs(HWPX) 실패: {path_str}: {e}"))
 }
