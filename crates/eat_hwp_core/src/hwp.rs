@@ -9,9 +9,7 @@
 //! - `GetTextFile` 사용 금지(여기서는 호출하지 않는다).
 
 use anyhow::{Result, anyhow};
-use hwp_com::HwpClient;
-use hwp_core::ext::HwpExt;
-use hwp_core::hwp_obj::HwpObject;
+use hwp_com::{HwpClient, HwpExt, HwpObject};
 use std::path::Path;
 
 /// 현재 커서/선택 컨텍스트. (SDK `GetPos`: list/para/pos)

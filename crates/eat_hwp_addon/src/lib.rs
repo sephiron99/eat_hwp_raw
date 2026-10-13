@@ -19,12 +19,11 @@ use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Command;
 
-use hwp_addon::debug::{log, msgbox_err};
-use hwp_addon::{export_hwp_addon, export_rundll_entry};
+use hwp_addon::debug::msgbox_err;
+use hwp_addon::logging::{self, LevelFilter};
+use hwp_addon::{HwpObject, Result, export_hwp_addon, export_rundll_entry};
 use hwp_addon::hwp_user_action::{ActionMeta, HwpUserAction, ToolbarConfig, ToolbarTarget};
 use hwp_addon::shortcut::{Modifiers, ShortcutKey};
-use hwp_core::error::Result;
-use hwp_core::hwp_obj::HwpObject;
 use windows::Win32::UI::Input::KeyboardAndMouse::VK_OEM_6;
 
 /// 툴바/리본 아이콘 스트립(960×16, 32bit BMP). `tools/make_icon.py`로 생성.
@@ -35,6 +34,11 @@ const ACTION_LAUNCH: &str = "LaunchEatHwpRaw";
 
 /// 이 DLL의 파일 이름(cargo 산출물 이름).
 const SELF_DLL_NAME: &str = concat!(env!("CARGO_PKG_NAME"), ".dll");
+
+/// 로그 파일 이름. 한글 안의 애드인과 독립 GUI 프로세스는 서로 다른 프로세스이고 구독자가
+/// 설치 시 파일을 비우므로 파일을 나눈다. 위치는 `%LOCALAPPDATA%\HwpAddon\`.
+const ADDON_LOG_FILE: &str = "eat_hwp_addon.log";
+const GUI_LOG_FILE: &str = "eat_hwp_raw_gui.log";
 
 /// rundll32가 호출할 export 이름.
 const RUNDLL_ENTRY: &str = "RunGuiW";
@@ -81,6 +85,7 @@ impl HwpUserAction for EatHwpLauncher {
 
     /// 기본 `on_load`(= `setup_toolbar`)를 감싸 설정 실패를 메시지 박스로 표면화한다(브링업 편의).
     fn on_load(&self, hwp: &HwpObject) -> Result<bool> {
+        init_log(ADDON_LOG_FILE);
         match self.setup_toolbar(hwp) {
             Ok(v) => Ok(v),
             Err(e) => {
@@ -110,9 +115,20 @@ impl HwpUserAction for EatHwpLauncher {
 /// `rundll32.exe eat_hwp_addon.dll,RunGuiW` 로 호출되는 진입점의 본체. 통합 GUI를 실행한다.
 /// 콘솔이 없으므로 오류는 메시지 박스로 표시한다.
 fn run_gui_entry() {
-    log("eat_hwp_addon", "RunGuiW 진입 — 독립 프로세스에서 GUI 시작");
+    init_log(GUI_LOG_FILE);
+    tracing::debug!("RunGuiW 진입 — 독립 프로세스에서 GUI 시작");
     if let Err(e) = eat_hwp_core::run_gui() {
         msgbox_err("eat_hwp_raw GUI", &format!("{e:?}"));
+    }
+}
+
+// ── 로그 ──
+
+/// `%LOCALAPPDATA%\HwpAddon\<file_name>`에 파일 로그 구독자를 설치한다(프로세스당 한 번).
+/// 로그는 부가 기능이므로 설치 실패는 무시한다.
+fn init_log(file_name: &str) {
+    if let Some(path) = logging::default_log_path() {
+        let _ = logging::init_file(path.with_file_name(file_name), LevelFilter::DEBUG);
     }
 }
 
@@ -127,7 +143,7 @@ fn launch_gui_process() -> std::result::Result<(), String> {
     // rundll32는 콤마 앞 경로에 공백이 있으면 파싱이 깨지므로 경로를 따옴표로 감싼다.
     // `arg`는 인자 전체를 다시 인용하므로 `raw_arg`로 그대로 전달한다.
     let entry = format!("\"{}\",{RUNDLL_ENTRY}", dll.display());
-    log("eat_hwp_addon", &format!("spawn: {} {}", rundll.display(), entry));
+    tracing::debug!(rundll = %rundll.display(), %entry, "spawn");
 
     let spawn = |flags: u32| {
         Command::new(&rundll)

@@ -10,7 +10,6 @@ name = "eat_hwp_core"
 [dependencies]
 # 한글(HWP) COM 자동화 (CLAUDE.md Dependencies)
 hwp_com = { path = "../../../hwp_automation_rs/crates/hwp_com" }
-hwp_core = { path = "../../../hwp_automation_rs/crates/hwp_core" }
 # hwpx 파서 (GetTextFile 금지 → SaveAs hwpx 후 파싱)
 hwpers = { path = "../../../hwpers" }
 # 오류 처리

@@ -12,8 +12,10 @@ crate-type = ["cdylib"]
 [dependencies]
 # 애드인 프레임워크(HwpUserAction 트레이트 + export_hwp_addon! 매크로).
 # CLAUDE.md 경계: 애드온 로직은 eat_hwp_raw 소속, hwp_addon은 의존성으로만 사용한다.
-hwp_addon = { path = "../../../hwp_automation_rs/crates/hwp_addon" }
-hwp_core = { path = "../../../hwp_automation_rs/crates/hwp_core" }
+# `file-log`: hwp_automation_rs 0.3부터 라이브러리가 로그 파일을 저절로 만들지 않으므로
+# 파일 구독자(`hwp_addon::logging`)를 직접 설치한다.
+hwp_addon = { path = "../../../hwp_automation_rs/crates/hwp_addon", features = ["file-log"] }
+tracing = { version = "0.1.44", default-features = false, features = ["std"] }
 # 통합 GUI. 별도 실행파일 없이 이 DLL을 rundll32가 독립 프로세스로 띄운다.
 eat_hwp_core = { path = "../eat_hwp_core" }
 
