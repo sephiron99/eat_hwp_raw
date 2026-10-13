@@ -15,7 +15,7 @@ LLM이 현재 HWP Document의 양식과 내용, 기초자료를 바탕으로 문
    * 제목/소제목 문단을 수정/완성할 때에는 직후 문단을 참고하여 1줄 이내로 입력 또는 수정한다.
    * 별도 모드가 아니라 커서의 컨텍스트가 제목/소제목/본문이라는 정보를 프롬프트에 추가하는 기능
 1. LLM Local or remote Server(nvidia spark dgx 등)를 지원
-1. Claude api, Gemini api는 추후지원으로 일단 설계에만 반영
+1. Claude api 지원(`EAT_HWP_LLM_PROVIDER=anthropic`). Gemini api는 추후지원으로 일단 설계에만 반영
 
 ## Workflow
 1. 사용자가 문단에 프롬프트 입력(생략가능) 
@@ -128,3 +128,10 @@ ollama run gemma4:e4b-it-qat --verbose "한 문단 써줘"   # eval rate(tok/s) 
 - `EAT_HWP_LLM_BASE_URL` = `http://localhost:11434/v1` (= 기본값)
 - `EAT_HWP_LLM_MODEL` = `gemma4:e4b-it-qat` (= 기본값. E2B 폴백 시에만 `gemma4:e2b-it-qat` 지정)
 - `EAT_HWP_LLM_API_KEY` = (빈 값)
+
+## Claude API (외부 llm service)
+로컬 서버 대신 Anthropic Claude API를 쓸 때의 env(Windows 측). 문서 내용이 외부 서버로 전송된다.
+- `EAT_HWP_LLM_PROVIDER` = `anthropic` (기본값 `openai` = OpenAI 호환 로컬/원격 서버)
+- `EAT_HWP_LLM_API_KEY` = Claude API 키. 없으면 `ANTHROPIC_API_KEY`를 읽는다
+- `EAT_HWP_LLM_MODEL` = 모델 ID. 기본값 `claude-opus-5-5`
+- `EAT_HWP_LLM_BASE_URL` = 지정하지 않는다(공식 주소 사용)

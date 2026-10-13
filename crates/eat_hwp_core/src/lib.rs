@@ -25,7 +25,7 @@ use std::sync::Arc;
 /// 창이 닫힐 때까지 블로킹(자체 메시지 루프)하므로, HWP UI 스레드를 막지 않도록 애드인이
 /// rundll32로 띄운 **독립 프로세스**에서 실행한다. GUI는 실행 중인 HWP에 COM으로 재접속한다.
 pub fn run_gui() -> Result<()> {
-    let cfg = config::Config::load();
+    let cfg = config::Config::load().map_err(|e| anyhow!("설정 오류: {e}"))?;
     let backend: Arc<dyn llm::LlmBackend + Send + Sync> = Arc::new(llm::RigBackend::new(&cfg)?);
 
     let window = gui::MainWindow::new(cfg, backend);

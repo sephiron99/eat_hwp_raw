@@ -1,15 +1,20 @@
 //! LLM 백엔드 추상화 및 구현.
 //!
-//! 백엔드 정본은 rig-rs(OpenAI 호환 로컬/원격 엔드포인트, CLAUDE.md Dependencies)다.
-//! 트레이트로 추상화해 두어 rig / Claude / Gemini 백엔드를 동일 인터페이스로 교체한다.
-//! Claude/Gemini는 추후 지원(설계만 반영).
+//! 백엔드 정본은 rig-rs(CLAUDE.md Dependencies)다. OpenAI 호환 로컬/원격 엔드포인트와
+//! Claude API를 지원한다. 트레이트로 추상화해 두어 백엔드를 동일 인터페이스로 교체한다.
+//! Gemini는 추후 지원(설계만 반영).
 
-use crate::config::Config;
-use anyhow::{Result, anyhow};
+use crate::config::{Config, Provider};
+use anyhow::{Result, anyhow, bail};
 use rig::completion::{CompletionRequest, Reasoning};
 use rig::driver::Model;
+use rig::providers::anthropic::AnthropicConfig;
+use rig::providers::anthropic::wire::Messages;
 use rig::providers::openai::OpenAIConfig;
 use rig::providers::openai::wire::Chat;
+
+/// Claude API 응답의 최대 출력 토큰. Messages API는 이 값을 반드시 요구한다.
+const ANTHROPIC_MAX_TOKENS: u64 = 16_000;
 
 /// 양식 준수를 위한 기본 시스템 지침(preamble).
 /// features(eat_hwp_raw.md): 제목/소제목/문단 구조 등 문서 양식을 최대한 준수한다.
@@ -21,26 +26,48 @@ pub trait LlmBackend {
     fn complete(&self, prompt: &str) -> Result<String>;
 }
 
-/// rig-rs 기반 백엔드. OpenAI 호환 엔드포인트(로컬 Ollama/vLLM, 원격 DGX 등)로 프롬프트를 실행한다.
+/// rig-rs 기반 백엔드. OpenAI 호환 엔드포인트(로컬 Ollama/vLLM, 원격 DGX 등) 또는 Claude API로
+/// 프롬프트를 실행한다.
 ///
 /// rig API는 async이므로 내부에 tokio 런타임을 두고 `block_on`으로 동기 인터페이스에 맞춘다.
 pub struct RigBackend {
     runtime: tokio::runtime::Runtime,
-    model: Model<Chat>,
+    model: RigModel,
     preamble: String,
 }
 
+/// 설정의 `Provider`에 따라 고른 rig 모델.
+enum RigModel {
+    /// `/v1/chat/completions` 경로(Ollama/vLLM 등 OpenAI 호환 서버 공통).
+    OpenAiCompatible(Model<Chat>),
+    /// Anthropic Messages API.
+    Anthropic(Model<Messages>),
+}
+
 impl RigBackend {
-    /// 설정으로부터 OpenAI 호환 클라이언트를 구성한다.
+    /// 설정의 `llm_provider`에 맞는 클라이언트를 구성한다.
     pub fn new(cfg: &Config) -> Result<Self> {
         let runtime = tokio::runtime::Runtime::new()
             .map_err(|e| anyhow!("tokio 런타임 생성 실패: {e}"))?;
-        let mut provider = OpenAIConfig::new(cfg.llm_api_key.as_str());
-        if !cfg.llm_base_url.is_empty() {
-            provider = provider.with_base_url(cfg.llm_base_url.as_str());
-        }
-        // `/v1/chat/completions` 경로(Ollama/vLLM 등 OpenAI 호환 서버 공통).
-        let model = provider.client().chat(cfg.llm_model.as_str());
+        let model = match cfg.llm_provider {
+            Provider::OpenAiCompatible => {
+                let mut provider = OpenAIConfig::new(cfg.llm_api_key.as_str());
+                if !cfg.llm_base_url.is_empty() {
+                    provider = provider.with_base_url(cfg.llm_base_url.as_str());
+                }
+                RigModel::OpenAiCompatible(provider.client().chat(cfg.llm_model.as_str()))
+            }
+            Provider::Anthropic => {
+                if cfg.llm_api_key.is_empty() {
+                    bail!("Claude API 키가 없음: EAT_HWP_LLM_API_KEY 또는 ANTHROPIC_API_KEY를 설정하세요");
+                }
+                let mut provider = AnthropicConfig::new(cfg.llm_api_key.as_str());
+                if !cfg.llm_base_url.is_empty() {
+                    provider = provider.with_base_url(cfg.llm_base_url.as_str());
+                }
+                RigModel::Anthropic(provider.client().completion(cfg.llm_model.as_str()))
+            }
+        };
         Ok(Self {
             runtime,
             model,
@@ -52,15 +79,18 @@ impl RigBackend {
 impl LlmBackend for RigBackend {
     fn complete(&self, prompt: &str) -> Result<String> {
         self.runtime.block_on(async {
-            // 추론(thinking) 모델은 끄지 않으면 생각에 토큰을 소진해 본문이 빈 채로 온다(Gemma 4 확인).
-            let request = CompletionRequest::new(prompt)
-                .preamble(self.preamble.as_str())
-                .reasoning(Reasoning::Off);
-            let response = self
-                .model
-                .call(request)
-                .await
-                .map_err(|e| anyhow!("rig 호출 실패: {e}"))?;
+            let request = CompletionRequest::new(prompt).preamble(self.preamble.as_str());
+            let response = match &self.model {
+                // 추론(thinking) 모델은 끄지 않으면 생각에 토큰을 소진해 본문이 빈 채로 온다(Gemma 4 확인).
+                RigModel::OpenAiCompatible(model) => {
+                    model.call(request.reasoning(Reasoning::Off)).await
+                }
+                // 추론을 끌 수 없는 Claude 모델이 있어 추론 설정은 API 기본값에 맡긴다.
+                RigModel::Anthropic(model) => {
+                    model.call(request.max_tokens(ANTHROPIC_MAX_TOKENS)).await
+                }
+            };
+            let response = response.map_err(|e| anyhow!("rig 호출 실패: {e}"))?;
             Ok(response.text())
         })
     }
