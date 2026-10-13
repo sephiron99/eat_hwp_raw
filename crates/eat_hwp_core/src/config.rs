@@ -20,8 +20,9 @@ impl Config {
     pub fn load() -> Self {
         Self {
             llm_base_url: env_or("EAT_HWP_LLM_BASE_URL", "http://localhost:11434/v1"),
-            // 기본 모델: WSL2 Ollama의 Gemma 4 12B. `ollama list` 태그와 정확히 일치해야 함.
-            llm_model: env_or("EAT_HWP_LLM_MODEL", "gemma4:12b"),
+            // 기본 모델: 실행환경(Windows, Intel 내장 그래픽, RAM 16GiB) Ollama의 Gemma 4 E4B QAT.
+            // `ollama list` 태그와 정확히 일치해야 함.
+            llm_model: env_or("EAT_HWP_LLM_MODEL", "gemma4:e4b-it-qat"),
             llm_api_key: std::env::var("EAT_HWP_LLM_API_KEY").unwrap_or_default(),
         }
     }

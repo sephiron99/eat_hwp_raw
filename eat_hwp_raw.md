@@ -36,14 +36,16 @@ LLM이 현재 HWP Document의 양식과 내용, 기초자료를 바탕으로 문
 1. 프롬프트 commit 버튼
 1. etc
 
-## local llm server
+## 개발환경 llm server (WSL2, RTX 5070)
 1. 외부 llm service
 1. local or intranet llm server(gemma4 or etc)
 1. windows -> wsl2(localhost) 접속은 설정완료(ex: windows chrome browser에서
     wsl2에서 실행한 웹서버 localhost:8000 으로 접속가능)
 1. vram 12GB, RTX5070
 
-### 서버 구성 (확정: RTX 5070 12GB)
+### 서버 구성 (개발용: RTX 5070 12GB)
+- **용도**: WSL2는 개발환경이다. 실제 실행환경은 아래 "실행환경 llm server"이며, 최종 검증은
+  실행환경 모델(`gemma4:e4b-it-qat`)로 한다 — 이 서버에 함께 pull해 두면 모델 env만 바꿔 확인 가능.
 - **서빙: Ollama** — 포트 `11434`, OpenAI 호환 `/v1`. 단일 사용자 GUI엔 충분하고 GGUF
   양자화로 12GB에 적합. (대규모 동시성/원격 DGX로 확장 시 vLLM `:8000/v1`로 교체 — 앱은
   base URL env만 변경.)
@@ -69,5 +71,59 @@ ollama run gemma4:12b "한국어로 인사해줘"             # GPU 로드 + 한
 
 #### eat_hwp_raw 연결 (env, Windows 측)
 - `EAT_HWP_LLM_BASE_URL` = `http://localhost:11434/v1` (= 기본값, mirrored라 그대로 닿음)
-- `EAT_HWP_LLM_MODEL` = `gemma4:12b` (`ollama list` 태그와 정확히 일치)
+- `EAT_HWP_LLM_MODEL` = `gemma4:12b` (기본값은 실행환경 모델 `gemma4:e4b-it-qat`이므로 12B를 쓸 때만
+  지정. `ollama list` 태그와 정확히 일치)
 - `EAT_HWP_LLM_API_KEY` = (빈 값, Ollama는 불필요)
+
+## 실행환경 llm server (Windows 10/11, Intel 내장 그래픽)
+1. 실제 실행환경: windows 10/11, intel 내장 그래픽, minimum ram 16GiB
+1. intel 내장 그래픽 구동 가능한 llm
+
+### 서버 구성 (Intel 내장 그래픽, 최소 RAM 16GiB)
+- **용도**: 실제 사용자 PC 구성. 앱 기본값과 양식 준수 품질 평가는 이 구성을 기준으로 한다.
+- **서빙: Ollama (Windows 네이티브)** — 포트 `11434`, OpenAI 호환 `/v1`. 한글·eat_hwp_raw와
+  같은 Windows에서 직접 실행하므로 WSL2가 필요 없다.
+- **모델: 기본 `gemma4:e4b-it-qat`(6.1GB)** — RAM 16GiB를 Windows·한글·내장 그래픽 공유 메모리와
+  나눠 쓰므로 가중치 ~6GB가 상한. 후보와 선정 기준은 아래 "모델 후보" 참조(실기 측정 전 잠정).
+- **컨텍스트: `num_ctx` 8K** — OpenAI 호환 API로는 요청별 지정이 안 되므로 서버 env
+  `OLLAMA_CONTEXT_LENGTH=8192`로 설정. 전체문서 컨텍스트는 초과하기 쉬우므로 현재문단 컨텍스트가 기본 사용 형태.
+- **가속/주의**: **CPU 추론을 기준선으로 잡는다.** 내장 그래픽 가속은 Vulkan 백엔드 경유인데
+  (Windows는 Intel 그래픽 드라이버에 Vulkan 포함), Ollama가 내장 그래픽을 기본으로 건너뛰어
+  `OLLAMA_IGPU_ENABLE=1`이 필요하다는 보고(공식 문서엔 없음)와 Iris Xe 미인식·출력 깨짐·러너 크래시
+  사례가 있다. 가속이 되면 덤이고, 증상이 있으면 `OLLAMA_VULKAN=0`으로 CPU 전환. 어느 쪽이든
+  개발환경(RTX)보다 응답이 크게 느리므로 모델 크기가 곧 체감 속도다.
+
+#### 모델 후보 (16GiB·CPU/내장 그래픽에서 구동 가능)
+크기는 Ollama 태그 목록 기준, 벤치마크는 각 모델 카드의 자체 발표치다. **이 환경에서 직접 돌려본
+결과가 아니므로** 실기에서 속도(tok/s)와 양식 준수를 측정해 확정한다.
+
+| 후보 | 크기 | 라이선스 | 구동 | 비고 |
+|---|---|---|---|---|
+| Gemma 4 E4B QAT | 6.1GB | 확인 필요 | `gemma4:e4b-it-qat` | 현 기본값. 후보 중 가장 크고 느림. 컨텍스트 128K |
+| Gemma 4 E2B QAT | 4.3GB | 확인 필요 | `gemma4:e2b-it-qat` | E4B가 느리거나 메모리 부족일 때 |
+| Mi:dm 2.0 Mini (KT, 2.3B) | Q4 GGUF(소형) | MIT | 커뮤니티 GGUF `hf.co/mykor/Midm-2.0-Mini-Instruct-gguf` | 한국어 특화. 모델 카드상 한국어 지시 이행 73.6로 Qwen3-4B(69.4)·EXAONE 3.5 2.4B(68.9)보다 높음. 공식 GGUF는 Base만 제공 |
+| Kanana 1.5 2.1B (Kakao) | Q4 GGUF(소형) | Apache-2.0 | 커뮤니티 GGUF(HF) | 한국어 특화. 컨텍스트 32K 기본 |
+| Qwen3 4B / 8B | 2.5GB / 5.2GB | 확인 필요 | `qwen3:4b`, `qwen3:8b` | 다국어 범용. Ollama 공식 라이브러리 |
+| EXAONE 3.5 2.4B / 7.8B (LG) | 1.6GB / 4.8GB | **비상업(NC)** | `exaone3.5:2.4b`, `exaone3.5:7.8b` | 한국어 품질은 좋으나 연구·비상업 용도 한정 → 배포용 기본값으로 부적합 |
+
+- **제외**: Gemma 4 12B(7.2–8.0GB)·Mi:dm 2.0 Base(11.5B)는 16GiB에서 스왑 위험, 26B 이상·EXAONE 32B·
+  HyperCLOVA X SEED 14B/32B는 메모리 초과.
+- **선정 순서(제안)**: ① `gemma4:e4b-it-qat`가 실기에서 쓸 만한 속도면 유지 → ② 느리면 한국어 특화
+  소형인 Mi:dm 2.0 Mini(MIT)와 `gemma4:e2b-it-qat`를 같은 문서로 비교 → ③ 그래도 부족하면 `qwen3:4b`.
+  어느 것이든 앱은 `EAT_HWP_LLM_MODEL`만 바꾸면 된다.
+
+#### 구동
+```powershell
+# Windows(PowerShell). Ollama for Windows 최신 버전 설치 후
+setx OLLAMA_CONTEXT_LENGTH 8192                        # 설정 후 Ollama 재시작(트레이 종료 → 재실행)
+ollama pull gemma4:e4b-it-qat
+ollama run gemma4:e4b-it-qat "한국어로 인사해줘"       # 한국어 출력 확인
+ollama ps                                              # PROCESSOR 열로 GPU/CPU 로드 확인
+ollama run gemma4:e4b-it-qat --verbose "한 문단 써줘"   # eval rate(tok/s) 측정 → 모델 선정 근거
+# 출력이 깨지거나 크래시하면: setx OLLAMA_VULKAN 0 후 Ollama 재시작(CPU 추론)
+```
+
+#### eat_hwp_raw 연결 (env, Windows 측)
+- `EAT_HWP_LLM_BASE_URL` = `http://localhost:11434/v1` (= 기본값)
+- `EAT_HWP_LLM_MODEL` = `gemma4:e4b-it-qat` (= 기본값. E2B 폴백 시에만 `gemma4:e2b-it-qat` 지정)
+- `EAT_HWP_LLM_API_KEY` = (빈 값)
