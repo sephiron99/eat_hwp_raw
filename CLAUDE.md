@@ -35,14 +35,14 @@ unsafe가 필요한 기능은 이 프로젝트에 두지 않고 hwp_automation_r
 1. Windows GUI는 [WinSafe](https://docs.rs/winsafe/latest/winsafe/gui/index.html) 
 1. [hwp_automation_rs](https://github.com/sephiron99/hwp_automation_rs) 에서 hwp_com을 기반으로 작성하되, 필요할 때에는 hwp_addon도 사용한다.
 1. Windows 10 이상 전용
-1. Hwp/Hwpx 파서: SaveAs로 hwpx 변환 후 [hwpers](https://github.com/Indosaram/hwpers)로 파싱 (GetTextFile 금지와 연계)
+1. 문서 내용: `GetTextFile`(`GetTextFileFormat::HwpMl2X`)로 HWPML 문자열을 받아 [roxmltree](https://docs.rs/roxmltree)로 파싱
 
 ## 유의사항 및 준수사항
 1. hwp_automation_rs에 없는 hwp com/action/api는 hwp_automation_rs에 해당
    기능을 추가하도록 제시. 단, addin같은 산출물은 hwp_automation_rs에 속하지
    않고, 이 프로젝트의 일부임.
 1. eat_hwp_raw 프로젝트에 hwp action/method/parameter을 추가하지 못함.
-1. Hwp sdk의 GetTextFile은 사용 금지
+1. 문서 내용은 Hwp sdk의 GetTextFile(HWPML2X)로 읽는다. SaveAs로 임시 파일을 만들거나 hwpx를 파싱하지 않는다.
 
 
 ## Features

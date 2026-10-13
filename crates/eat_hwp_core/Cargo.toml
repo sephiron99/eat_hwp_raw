@@ -10,8 +10,8 @@ name = "eat_hwp_core"
 [dependencies]
 # 한글(HWP) COM 자동화 (CLAUDE.md Dependencies)
 hwp_com = { path = "../../../hwp_automation_rs/crates/hwp_com" }
-# hwpx 파서 (GetTextFile 금지 → SaveAs hwpx 후 파싱)
-hwpers = { path = "../../../hwpers" }
+# GetTextFile(HWPML2X)가 돌려주는 XML 파서
+roxmltree = "0.21"
 # 오류 처리
 anyhow = "1"
 # LLM 백엔드 (OpenAI 호환 로컬/원격 엔드포인트).

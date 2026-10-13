@@ -5,16 +5,14 @@
 //! - 프롬프트/답변 textarea (multiline Edit; 답변은 read-only)
 //! - 실행(commit) 버튼 → 워크플로 실행 → 답변 표시 + 처리완료 알람(MessageBox)
 //!
-//! hwpx 컨텍스트 확보는 `hwp` 모듈을 경유한다. 라이브 SaveAs(`hwp::save_as_hwpx`)는 아직
-//! hwp_automation_rs의 typed 메서드 대기 중(스텁)이므로, 테스트를 위해 환경변수 `EAT_HWP_DOC`로
-//! 기존 hwpx 경로를 직접 지정하면 그 파일을 사용한다.
+//! 문서 내용은 `hwp` 모듈이 실행 중인 한글에서 `GetTextFile`(HWPML2X)로 읽어 온다. 한글 없이
+//! 테스트할 때는 환경변수 `EAT_HWP_DOC`에 HWPML 파일(UTF-8) 경로를 지정하면 그 파일을 사용한다.
 
 use crate::config::Config;
 use crate::hwp::{self, DocContext};
 use crate::llm::LlmBackend;
 use crate::workflow::{self, Scope};
-use anyhow::Result;
-use std::path::PathBuf;
+use anyhow::{Result, anyhow};
 use std::sync::Arc;
 use winsafe::{co, gui, prelude::*};
 
@@ -203,33 +201,34 @@ fn finish_on_ui(wnd: &gui::WindowMain, result: Result<String>) {
     }
 }
 
-/// hwpx 컨텍스트를 확보해 워크플로를 실행한다.
+/// 문서 내용(HWPML)과 커서 컨텍스트를 확보해 워크플로를 실행한다.
 fn run_workflow(
     cfg: &Config,
     backend: &dyn LlmBackend,
     user_prompt: &str,
     scope: Scope,
 ) -> Result<String> {
-    let (hwpx, ctx) = acquire_hwpx()?;
+    let (hwpml, ctx) = acquire_hwpml()?;
     // 본문(list 0) 커서일 때만 현재 문단 인덱스를 넘긴다. (그 외엔 전체 문서로 폴백)
     let cursor_para = ctx.and_then(|c| c.body_paragraph_index());
-    workflow::run_prompt(cfg, backend, &hwpx, user_prompt, scope, cursor_para)
+    workflow::run_prompt(cfg, backend, &hwpml, user_prompt, scope, cursor_para)
 }
 
-/// 파싱할 hwpx 경로와(가능하면) 커서 컨텍스트를 확보한다.
+/// 문서의 HWPML과(가능하면) 커서 컨텍스트를 확보한다.
 ///
-/// 1) 환경변수 `EAT_HWP_DOC`가 지정되면 그 기존 hwpx를 사용(테스트 경로, 커서 컨텍스트 없음).
-/// 2) 아니면 실행 중인 한글에 연결 → 현재 컨텍스트(GetPos) 확보 → TMP에 hwpx로 SaveAs.
-fn acquire_hwpx() -> Result<(PathBuf, Option<DocContext>)> {
+/// 1) 환경변수 `EAT_HWP_DOC`가 지정되면 그 HWPML 파일을 읽는다(테스트 경로, 커서 컨텍스트 없음).
+/// 2) 아니면 실행 중인 한글에 연결 → 현재 컨텍스트(GetPos) 확보 → GetTextFile(HWPML2X).
+fn acquire_hwpml() -> Result<(String, Option<DocContext>)> {
     if let Ok(p) = std::env::var("EAT_HWP_DOC") {
         if !p.is_empty() {
-            // 테스트 경로: 기존 hwpx만 사용하고 라이브 커서 컨텍스트는 없다.
-            return Ok((PathBuf::from(p), None));
+            // 테스트 경로: 기존 HWPML 파일만 사용하고 라이브 커서 컨텍스트는 없다.
+            let hwpml = std::fs::read_to_string(&p)
+                .map_err(|e| anyhow!("EAT_HWP_DOC 파일을 읽지 못함: {p}: {e}"))?;
+            return Ok((hwpml, None));
         }
     }
     let hwp = hwp::connect()?;
     let ctx = hwp::current_context(&hwp)?;
-    let tmp = std::env::temp_dir().join("eat_hwp_raw_ctx.hwpx");
-    hwp::save_as_hwpx(&hwp, &tmp)?;
-    Ok((tmp, Some(ctx)))
+    let hwpml = hwp::document_hwpml(&hwp)?;
+    Ok((hwpml, Some(ctx)))
 }

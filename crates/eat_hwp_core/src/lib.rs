@@ -7,7 +7,7 @@
 //! 별도 실행파일은 없다. 애드인 DLL(`eat_hwp_addon`)이 HWP 프로세스 안에서 단축키/버튼으로
 //! rundll32를 spawn하고, 그 **독립 프로세스**가 [`run_gui`]를 호출해 GUI를 띄운다.
 //!
-//! 워크플로(eat_hwp_raw.md): GUI에 프롬프트 입력 → hwpx 컨텍스트 파싱 → rig LLM 실행 →
+//! 워크플로(eat_hwp_raw.md): GUI에 프롬프트 입력 → HWPML 컨텍스트 파싱 → rig LLM 실행 →
 //! 답변 표시 + 완료 알람.
 
 mod config;

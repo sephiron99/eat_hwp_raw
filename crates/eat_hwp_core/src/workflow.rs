@@ -1,13 +1,12 @@
 //! eat_hwp_raw 워크플로 오케스트레이션.
 //!
-//! 파이프라인(eat_hwp_raw.md Workflow): hwpx 파싱 → 컨텍스트+프롬프트 구성 → LLM 실행.
-//! (라이브 컨텍스트 확보/SaveAs/결과 입력은 hwp 모듈 및 후속 증분에서 연결한다.)
+//! 파이프라인(eat_hwp_raw.md Workflow): HWPML 파싱 → 컨텍스트+프롬프트 구성 → LLM 실행.
+//! (결과 입력은 후속 증분에서 연결한다.)
 
 use crate::config::Config;
 use crate::llm::LlmBackend;
 use crate::parse;
 use anyhow::Result;
-use std::path::Path;
 
 /// 컨텍스트 범위 (GUI의 "현재문단/전체문서" 체크버튼에 대응).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -23,22 +22,22 @@ pub enum Scope {
 const CONTEXT_BEFORE: usize = 3;
 const CONTEXT_AFTER: usize = 3;
 
-/// hwpx 파일과 사용자 프롬프트로 LLM 응답을 생성한다.
+/// 문서의 HWPML과 사용자 프롬프트로 LLM 응답을 생성한다.
 ///
 /// `cursor_para`는 본문 커서 문단 인덱스(없으면 `None`). `Scope::CurrentParagraph`일 때만 쓰인다.
 pub fn run_prompt(
     _cfg: &Config,
     backend: &dyn LlmBackend,
-    hwpx_path: &Path,
+    hwpml: &str,
     user_prompt: &str,
     scope: Scope,
     cursor_para: Option<usize>,
 ) -> Result<String> {
-    let doc = parse::parse_hwpx(hwpx_path)?;
+    let doc = parse::parse_hwpml(hwpml)?;
 
     let context = match (scope, cursor_para) {
         (Scope::CurrentParagraph, Some(center)) => {
-            current_paragraph_context(&parse::paragraph_texts(&doc), center)
+            current_paragraph_context(parse::paragraph_texts(&doc), center)
         }
         // 전체 문서이거나, 커서 정보가 없는 경우(예: EAT_HWP_DOC 테스트 경로)는 전체 문서로 폴백.
         _ => parse::document_text(&doc),

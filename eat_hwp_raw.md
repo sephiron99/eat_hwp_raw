@@ -22,10 +22,9 @@ LLM이 현재 HWP Document의 양식과 내용, 기초자료를 바탕으로 문
 1. 사용자가 eat_hwp_raw 호출하는 addon의 `버튼1` 클릭 or 단축키 `Ctrl+]`
 1. eat_hwp_raw GUI 팝업(별도 프로세스)
 1. eat_hwp_raw는 hwp_automation_rs로 현재 컨텍스트(커서위치, 블록 정보 등) 확보
-1. SaveAs로 TMP 디렉토리에 hwpx 저장 후 hwp사용자는 기존 문서 작업 계속, 또는 별개의 Workflow 실행 가능
+1. GetTextFile(HWPML2X)로 현재 문서 내용을 문자열로 확보 후 hwp사용자는 기존 문서 작업 계속, 또는 별개의 Workflow 실행 가능
 1. eat_hwp_raw GUI에 자유롭게 프롬프트 입력 
-1. eat_hwp_raw는 TMP에 저장된 hwpx를 [hwpers](https://github.com/Indosaram/hwpers)로
-   파싱하고, 프롬프트 실행
+1. eat_hwp_raw는 확보한 HWPML을 파싱하고, 프롬프트 실행
 1. 결과물은 별도의 새 hwp 창을 띄워서 거기에 입력하되, 그 결과물에 맞는 서식을
    최대한 적용
 1. 처리완료 알람 팝업(windows api)

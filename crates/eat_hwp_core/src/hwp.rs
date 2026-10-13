@@ -1,4 +1,4 @@
-//! 한글(HWP) 연동: `hwp_com` OLE 클라이언트로 현재 문서 컨텍스트 확보 및 hwpx 저장.
+//! 한글(HWP) 연동: `hwp_com` OLE 클라이언트로 현재 문서 컨텍스트와 문서 내용(HWPML) 확보.
 //!
 //! 워크플로(eat_hwp_raw.md): addon이 eat_hwp_raw를 호출하므로 한글은 이미 실행 중 →
 //! `HwpClient::attach()`로 실행 중인 인스턴스에 연결한다.
@@ -6,11 +6,11 @@
 //! CLAUDE.md 준수사항:
 //! - eat_hwp_raw는 hwp action/method/parameter를 직접 추가하지 않는다.
 //! - 누락 기능은 hwp_automation_rs에 추가하도록 제안한다.
-//! - `GetTextFile` 사용 금지(여기서는 호출하지 않는다).
+//! - 문서 내용은 `GetTextFile`(HWPML2X)로 읽는다. 파일로 저장하지 않는다.
 
-use anyhow::{Result, anyhow};
-use hwp_com::{HwpClient, HwpExt, HwpObject};
-use std::path::Path;
+use anyhow::{Result, anyhow, bail};
+use hwp_com::method::hwp_object::GetTextFileFormat;
+use hwp_com::{HwpClient, HwpObject};
 
 /// 현재 커서/선택 컨텍스트. (SDK `GetPos`: list/para/pos)
 #[derive(Clone, Debug)]
@@ -44,15 +44,15 @@ pub fn current_context(hwp: &HwpObject) -> Result<DocContext> {
     Ok(DocContext { list, para, pos })
 }
 
-/// 현재 문서를 hwpx 포맷으로 `path`에 저장한다.
+/// 현재 문서 전체를 HWPML 2.x 문자열로 읽는다. (SDK `GetTextFile("HWPML2X", "")`)
 ///
-/// CLAUDE.md 준수사항(1번)에 따라 hwp SaveAs는 hwp_automation_rs에 추가한 typed 메서드
-/// `HwpExt::save_as_hwpx(&str)`를 호출한다(VARIANT/파라미터는 eat_hwp_raw에서 직접 구성하지 않음).
-pub fn save_as_hwpx(hwp: &HwpObject, path: &Path) -> Result<()> {
-    let path_str = path
-        .to_str()
-        .ok_or_else(|| anyhow!("저장 경로가 UTF-8이 아님: {}", path.display()))?;
-    // 한글이 false(실패)를 돌려주면 hwp_core가 `HwpError::ExecutionFailed`로 변환한다.
-    hwp.save_as_hwpx(path_str)
-        .map_err(|e| anyhow!("SaveAs(HWPX) 실패: {path_str}: {e}"))
+/// 한글이 빈 문자열을 돌려주면 실패로 본다.
+pub fn document_hwpml(hwp: &HwpObject) -> Result<String> {
+    let hwpml = hwp
+        .get_text_file(GetTextFileFormat::HwpMl2X, false)
+        .map_err(|e| anyhow!("GetTextFile(HWPML2X) 실패: {e}"))?;
+    if hwpml.is_empty() {
+        bail!("GetTextFile(HWPML2X)가 빈 문자열을 반환했습니다");
+    }
+    Ok(hwpml)
 }
