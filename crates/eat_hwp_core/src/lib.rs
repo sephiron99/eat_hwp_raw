@@ -1,8 +1,8 @@
 #![forbid(unsafe_code)]
 //! eat_hwp_core — eat_hwp_raw의 GUI·파이프라인 라이브러리.
 //!
-//! 현재 HWP 문서의 양식·내용·기초자료를 바탕으로 문서를 작성/수정/완성하는 파이프라인
-//! (config/hwp/parse/llm/workflow)과 winsafe GUI를 제공한다.
+//! LLM이 문서 전체 구조와 내용을 읽고, 커서가 위치한 곳에 들어갈 글을 폰트도 맞춰서 입력하기
+//! 위한 파이프라인(config/hwp/parse/llm/workflow)과 winsafe GUI를 제공한다.
 //!
 //! 별도 실행파일은 없다. 애드인 DLL(`eat_hwp_addon`)이 HWP 프로세스 안에서 단축키/버튼으로
 //! rundll32를 spawn하고, 그 **독립 프로세스**가 [`run_gui`]를 호출해 GUI를 띄운다.
@@ -18,7 +18,6 @@ mod parse;
 mod workflow;
 
 use anyhow::{Result, anyhow};
-use std::sync::Arc;
 
 /// GUI를 띄우고 워크플로를 구동한다.
 ///
@@ -26,9 +25,7 @@ use std::sync::Arc;
 /// rundll32로 띄운 **독립 프로세스**에서 실행한다. GUI는 실행 중인 HWP에 COM으로 재접속한다.
 pub fn run_gui() -> Result<()> {
     let cfg = config::Config::load().map_err(|e| anyhow!("설정 오류: {e}"))?;
-    let backend: Arc<dyn llm::LlmBackend + Send + Sync> = Arc::new(llm::RigBackend::new(&cfg)?);
-
-    let window = gui::MainWindow::new(cfg, backend);
+    let window = gui::MainWindow::new(cfg);
     window.run().map_err(|e| anyhow!("GUI 실행 오류: {e}"))?;
     Ok(())
 }
