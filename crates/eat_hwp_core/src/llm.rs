@@ -17,7 +17,7 @@ use rig::providers::openai::wire::Chat;
 const ANTHROPIC_MAX_TOKENS: u64 = 16_000;
 
 /// 양식 준수를 위한 기본 시스템 지침(preamble).
-/// features(eat_hwp_raw.md): 제목/소제목/문단 구조 등 문서 양식을 최대한 준수한다.
+/// features(CLAUDE.md): 제목/소제목/문단 구조 등 문서 양식을 최대한 준수한다.
 const DEFAULT_PREAMBLE: &str = "당신은 HWP 문서 작성 도우미입니다. \
 주어진 문서의 양식(제목/소제목/문단 구조)을 최대한 준수하여 한국어로 작성하세요.";
 

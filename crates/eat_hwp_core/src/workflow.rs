@@ -1,6 +1,7 @@
 //! eat_hwp_raw 워크플로 오케스트레이션.
 //!
-//! 파이프라인(eat_hwp_raw.md Workflow): HWPML 파싱 → 컨텍스트+프롬프트 구성 → LLM 실행.
+//! 파이프라인: HWPML 파싱 → 컨텍스트+프롬프트 구성 → LLM 실행.
+//! 목표 구조(CLAUDE.md Workflow)에서는 이 단계를 `eat_hwp_server`가 맡는다.
 //! (결과 입력은 후속 증분에서 연결한다.)
 
 use crate::config::Config;
@@ -74,7 +75,7 @@ fn current_paragraph_context(paras: &[&str], center: usize) -> String {
 
 /// 문서 양식 준수 지침을 포함한 프롬프트를 구성한다.
 ///
-/// features(eat_hwp_raw.md): 양식(제목/소제목/문단 구조)을 최대한 준수하고, 인접 제목/소제목
+/// features(CLAUDE.md): 양식(제목/소제목/문단 구조)을 최대한 준수하고, 인접 제목/소제목
 /// 레벨에 상응하도록 작성한다.
 fn build_prompt(doc_context: &str, user_prompt: &str) -> String {
     format!(

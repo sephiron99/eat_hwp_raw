@@ -1,8 +1,9 @@
 //! 설정: LLM 백엔드 엔드포인트 등 런타임 구성.
 //!
-//! features(eat_hwp_raw.md): "LLM Local or remote Server(nvidia spark dgx 등)를 지원".
+//! features(CLAUDE.md): "LLM Local or remote Server(nvidia spark dgx 등)를 지원".
 //! 따라서 OpenAI 호환 base URL을 기본으로 하여 로컬(Ollama/vLLM 등) 및 원격 서버를 모두 수용한다.
 //! `EAT_HWP_LLM_PROVIDER=anthropic`이면 Claude API를 쓴다. Gemini API는 추후 지원(설계만 반영).
+//! 목표 구조(CLAUDE.md)에서 LLM 설정은 서버(`eat_hwp_server`)에 둔다.
 
 /// Claude API의 기본 모델.
 const DEFAULT_CLAUDE_MODEL: &str = "claude-opus-5-5";

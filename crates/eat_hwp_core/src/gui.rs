@@ -1,4 +1,8 @@
-//! winsafe 기반 GUI 셸 (eat_hwp_raw.md "eat_hwp_raw GUI").
+//! winsafe 기반 GUI 셸 (CLAUDE.md "eat_hwp_raw GUI"의 현재 구현).
+//!
+//! 목표 구조에서 GUI는 `eat_hwp_addon`으로 옮기고 구성도 바뀐다(서버 지정, 프롬프트 수정,
+//! 전송·통신 상황). LLM 설정은 서버에 두므로 Claude API 키 입력 칸은 남지 않고, 현재문단/전체문서
+//! 선택은 삭제하며, 답변 칸과 처리완료 알람은 구현을 보류한다.
 //!
 //! 구성:
 //! - Claude API 키 입력 칸(비우면 환경 변수 설정대로 실행)

@@ -1,6 +1,7 @@
 //! 한글(HWP) 연동: `hwp_com` OLE 클라이언트로 현재 문서 내용(HWPML)과 커서 위치 확보.
 //!
-//! 워크플로(eat_hwp_raw.md): addon이 eat_hwp_raw를 호출하므로 한글은 이미 실행 중 →
+//! 목표 구조(CLAUDE.md)에서는 한글 안의 애드온이 HWPML을 획득해 GUI 프로세스에 넘긴다.
+//! 현재 구현: addon이 GUI 프로세스를 띄우므로 한글은 이미 실행 중 →
 //! `HwpClient::attach()`로 실행 중인 인스턴스에 연결한다.
 //!
 //! CLAUDE.md 준수사항:

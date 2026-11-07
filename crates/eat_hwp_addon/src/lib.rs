@@ -1,6 +1,16 @@
-//! eat_hwp_raw 런처 애드인 DLL (GUI 통합형, 독립 프로세스 기동).
+//! eat_hwp_raw 런처 애드온 DLL (GUI 통합형, 독립 프로세스 기동).
 //!
-//! 애드인 DLL은 한글(HWP) 프로세스 안에 로드되어 동작한다. 리본 버튼/단축키 `Ctrl+]`를 누르면
+//! 목표 구조(CLAUDE.md "구조 / 산출물")에서 이 크레이트는 클라이언트이고 두 부분으로 나뉜다.
+//! - 애드온(한글 프로세스 안): 호출되면 문서 파일을 저장하고, 현재 문서의 HWPML을 획득해 GUI
+//!   프로세스에 넘기는 역할만 한다.
+//! - GUI(독립 프로세스): HWPML을 메모리에 보관하다가 프롬프트 등과 함께 서버(`eat_hwp_server`)로
+//!   전송하고, 회신받은 HWPML 조각을 `SetTextFile`로 문서에 넣는다. 서버 지정, 프롬프트 수정,
+//!   전송·통신 상황 표시를 맡는다.
+//!
+//! 아래는 현재 구현의 설명이다. 현재는 GUI가 `eat_hwp_core`에 있고, GUI 프로세스가 한글에 직접
+//! 붙어 HWPML을 읽는다.
+//!
+//! 애드온 DLL은 한글(HWP) 프로세스 안에 로드되어 동작한다. 리본 버튼/단축키 `Ctrl+]`를 누르면
 //! **별도 실행파일 없이** 같은 DLL에 통합된 GUI를 **독립 프로세스**로 띄운다. 한글이 종료돼도
 //! GUI 프로세스는 살아남는다.
 //!
@@ -35,7 +45,7 @@ const ACTION_LAUNCH: &str = "LaunchEatHwpRaw";
 /// 이 DLL의 파일 이름(cargo 산출물 이름).
 const SELF_DLL_NAME: &str = concat!(env!("CARGO_PKG_NAME"), ".dll");
 
-/// 로그 파일 이름. 한글 안의 애드인과 독립 GUI 프로세스는 서로 다른 프로세스이고 구독자가
+/// 로그 파일 이름. 한글 안의 애드온과 독립 GUI 프로세스는 서로 다른 프로세스이고 구독자가
 /// 설치 시 파일을 비우므로 파일을 나눈다. 위치는 `%LOCALAPPDATA%\HwpAddon\`.
 const ADDON_LOG_FILE: &str = "eat_hwp_addon.log";
 const GUI_LOG_FILE: &str = "eat_hwp_raw_gui.log";
