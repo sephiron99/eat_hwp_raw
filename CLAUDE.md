@@ -99,7 +99,8 @@ GUI는 `eat_hwp_addon`에 두고 독립 프로세스로 실행한다. 구성:
    않은 시점에 문서가 저장되는 점을 어떻게 다룰지.
 1. **선택 범위**: `hwpml_with_caret`은 선택 블록이 있으면 블록의 앞쪽 끝만 돌려주고 선택을 푼다. 고칠
    범위의 끝을 HWPML 안에서 알 방법과, 삽입 전에 그 범위를 다시 선택할 방법이 없다. `GetSelectedPos`는
-   hwp_automation_rs에 아직 없다(추가 제시 대상).
+   hwp_automation_rs 0.4.0에 `HwpObject::get_selected_pos`(→ `ListParaRange`)로 들어왔다. 그 번호를 HWPML
+   안의 위치로 바꾸는 방법은 아직 없다.
 1. **원래 문서와 캐럿 위치로 돌아가기**: 응답을 기다리는 사이 사용자가 내용은 고치지 않고 캐럿만
    옮기거나 다른 문서 탭으로 갈 수 있다. GUI 프로세스가 원래 문서를 다시 찾는 방법, 호출된 캐럿 위치로
    돌아가는 방법이 필요하다. `SetPos`는 hwp_automation_rs에 아직 없다(추가 제시 대상).
@@ -140,7 +141,7 @@ unsafe가 필요한 기능은 이 프로젝트에 두지 않고 hwp_automation_r
 1. Windows GUI는 [WinSafe](https://docs.rs/winsafe/latest/winsafe/gui/index.html)
 1. [hwp_automation_rs](https://github.com/sephiron99/hwp_automation_rs) 에서 hwp_com을 기반으로 작성하되, 필요할 때에는 hwp_addon도 사용한다.
 1. 문서 내용: `GetTextFile`(`GetTextFileFormat::HwpMl2X`)로 HWPML 문자열을 받는다.
-   커서 위치는 `HwpExt::hwpml_with_caret`이 돌려주는 HWPML 안의 바이트 위치로 찾는다(`GetPos` 번호는 쓰지 않음)
+   커서 위치는 `hwp.ext_doc().hwpml_with_caret()`(`ExtDoc`)이 돌려주는 HWPML 안의 바이트 위치로 찾는다(`GetPos` 번호는 쓰지 않음)
 
 ## 유의사항 및 준수사항
 1. hwp_automation_rs에 없는 hwp com/action/api는 hwp_automation_rs에 해당
