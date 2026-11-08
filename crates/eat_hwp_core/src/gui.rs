@@ -18,7 +18,8 @@
 //!   - 대화는 문서와 API 종류(로컬/OpenAI 호환, Claude)마다 `chat_store`가 정한 파일에 저장되고,
 //!     같은 문서·API로 돌아오면 다시 불러온다. 창을 열 때 한글의 현재 문서를, 요청을 보낼 때 읽은
 //!     문서를, 상태를 점검할 때 그 설정의 API 종류를 기준으로 바꾼다
-//! - 프롬프트 입력 칸 + 보내기 버튼. 보내면 입력 칸을 비운다. 처리완료 팝업은 없다
+//! - 프롬프트 입력 칸 + 보내기 버튼(Ctrl+Enter로도 보낸다). 보내면 입력 칸을 비운다. 처리완료
+//!   팝업은 없다
 //!
 //! LLM에는 항상 문서 전체를 커서 위치 표시와 함께 보낸다.
 //!
@@ -41,6 +42,9 @@ use winsafe::{co, gui, prelude::*};
 /// 워커 스레드 완료 후 UI 스레드에서 `HWND::GetDlgItem`으로 컨트롤을 찾는 데 쓴다
 /// (winsafe 컨트롤은 Send가 아니라 스레드 경계를 넘길 수 없으므로 ID로 우회).
 const ID_BTN_RUN: u16 = 1002;
+
+/// Ctrl+Enter 가속기의 명령 ID. 창 어디에서 눌러도 보내기 버튼을 누른 것과 같다.
+const ID_ACCEL_SEND: u16 = 2001;
 
 /// 대화 칸에서 한 차례(프롬프트 + 답변)가 끝날 때마다 넣는 구분선.
 const TURN_SEPARATOR: &str = "────────────────────────────";
@@ -92,7 +96,16 @@ pub struct MainWindow {
 impl MainWindow {
     /// 윈도우와 컨트롤을 생성하고 이벤트를 연결한다.
     pub fn new(cfg: Config) -> Self {
+        // Ctrl+Enter → ID_ACCEL_SEND. 가속기는 키 입력이 Edit에 가기 전에 처리되므로 프롬프트 칸에
+        // 줄바꿈이 들어가지 않는다(Enter만 누르면 그대로 줄바꿈).
+        let accel_table = winsafe::HACCEL::CreateAcceleratorTable(&[winsafe::ACCEL {
+            fVirt: co::ACCELF::VIRTKEY | co::ACCELF::CONTROL,
+            key: co::VK::RETURN,
+            cmd: ID_ACCEL_SEND,
+        }])
+        .ok();
         let wnd = gui::WindowMain::new(gui::WindowMainOpts {
+            accel_table,
             title: "eat_hwp_raw — HWP AI Agent",
             size: gui::dpi(520, 504),
             ..Default::default()
@@ -102,7 +115,7 @@ impl MainWindow {
         let lbl_prompt = gui::Label::new(
             &wnd,
             gui::LabelOpts {
-                text: "프롬프트",
+                text: "프롬프트 (Ctrl+Enter로 보내기)",
                 position: gui::dpi(10, 386),
                 ..Default::default()
             },
@@ -300,6 +313,17 @@ impl MainWindow {
             });
         }
 
+        // Ctrl+Enter: 보내기 버튼이 켜져 있을 때(응답 대기 중이 아닐 때)만 누른다.
+        {
+            let btn_run = self.btn_run.clone();
+            self.wnd.on().wm_command_acc_menu(ID_ACCEL_SEND, move || {
+                if btn_run.hwnd().IsWindowEnabled() {
+                    btn_run.trigger_click();
+                }
+                Ok(())
+            });
+        }
+
         self.btn_run.on().bn_clicked(move || {
             let user_prompt = txt_prompt.text().unwrap_or_default();
             // 키를 입력했으면 Claude API로, 비웠으면 환경 변수 설정대로 실행한다.
@@ -385,8 +409,9 @@ fn check_server(wnd: &gui::WindowMain, cfg: Arc<Config>) {
     std::thread::spawn(move || {
         let status = llm::check_server(&cfg);
         let default_model = cfg.llm_model.clone();
+        let provider = cfg.llm_provider;
         wnd.run_ui_thread(move || {
-            show_status(status, &default_model);
+            show_status(status, &default_model, provider);
             Ok(())
         });
     });
@@ -404,7 +429,7 @@ fn set_status(text: &str) {
 ///
 /// 칸에 있던 모델이 새 목록에 있으면 그대로 두고, 없으면(백엔드가 바뀐 경우 등) 설정의 기본
 /// 모델로 바꾼다. 그 모델도 목록에 없으면 상태 줄에 경고를 붙인다.
-fn show_status(status: ServerStatus, default_model: &str) {
+fn show_status(status: ServerStatus, default_model: &str, provider: Provider) {
     let ServerStatus {
         target,
         state,
@@ -412,11 +437,18 @@ fn show_status(status: ServerStatus, default_model: &str) {
     } = status;
     let text = match state {
         ServerState::Working(models) => {
-            let missing = !fill_models(&models, default_model);
+            // 로컬/OpenAI 호환 서버의 목록은 쓸 수 있는 모델 전부다. Claude API는 목록에 없는
+            // 별칭도 받으므로 목록에 없다고 다른 모델로 바꾸지 않는다.
+            let note = match fill_models(&models, default_model, provider == Provider::OpenAiCompatible) {
+                ModelPick::Kept => String::new(),
+                ModelPick::Replaced { missing, picked } => {
+                    format!(" · 모델 {missing}이(가) 서버에 없어 {picked}을(를) 선택함")
+                }
+                ModelPick::Missing => " · ⚠ 선택한 모델이 목록에 없음".to_string(),
+            };
             format!(
-                "LLM 상태: ✔ 작동 중 — {target} (응답 {elapsed_ms}ms, 모델 {}개){}",
-                models.len(),
-                if missing { " · ⚠ 선택한 모델이 목록에 없음" } else { "" }
+                "LLM 상태: ✔ 작동 중 — {target} (응답 {elapsed_ms}ms, 모델 {}개){note}",
+                models.len()
             )
         }
         ServerState::NoKey => "LLM 상태: ✖ 키 없음 — Claude API 키를 입력하세요".to_string(),
@@ -431,29 +463,49 @@ fn show_status(status: ServerStatus, default_model: &str) {
     set_status(&text);
 }
 
-/// 모델 칸 목록을 `models`로 바꾼다. 칸에 남은 모델이 목록에 있으면 `true`.
-fn fill_models(models: &[String], default_model: &str) -> bool {
+/// [`fill_models`]가 모델 칸에 남긴 모델.
+enum ModelPick {
+    /// 칸의 모델이나 설정의 기본 모델이 목록에 있어 그대로 두었다.
+    Kept,
+    /// 둘 다 목록에 없어 목록의 첫 모델로 바꿨다.
+    Replaced { missing: String, picked: String },
+    /// 목록에 없는 모델이 칸에 남았다.
+    Missing,
+}
+
+/// 모델 칸 목록을 `models`로 바꾸고 쓸 모델을 고른다.
+///
+/// 칸의 모델 → 설정의 기본 모델 순으로 목록에 있는 것을 고른다. 둘 다 없고 `replace_missing`이면
+/// 목록의 첫 모델을 고른다. 없는 모델이 남아 있으면 요청이 "model not found"로 실패하기 때문이다.
+fn fill_models(models: &[String], default_model: &str, replace_missing: bool) -> ModelPick {
     SERVER_UI.with_borrow(|ui| {
         let Some((cmb, _)) = ui else {
-            return true;
+            return ModelPick::Kept;
         };
         let current = cmb.hwnd().GetWindowText().unwrap_or_default();
         let current = current.trim();
-        let keep = if models.iter().any(|m| m == current) {
-            current.to_string()
+        let wanted = if models.iter().any(|m| m == current) {
+            current
         } else {
-            default_model.to_string()
+            default_model
         };
         cmb.items().delete_all();
         let _ = cmb.items().add(models);
-        match models.iter().position(|m| *m == keep) {
-            Some(i) => {
-                cmb.items().select(Some(i as u32));
-                true
+        if let Some(i) = models.iter().position(|m| m == wanted) {
+            cmb.items().select(Some(i as u32));
+            return ModelPick::Kept;
+        }
+        match models.first() {
+            Some(first) if replace_missing => {
+                cmb.items().select(Some(0));
+                ModelPick::Replaced {
+                    missing: wanted.to_string(),
+                    picked: first.clone(),
+                }
             }
-            None => {
-                let _ = cmb.hwnd().SetWindowText(&keep);
-                false
+            _ => {
+                let _ = cmb.hwnd().SetWindowText(wanted);
+                ModelPick::Missing
             }
         }
     })
