@@ -8,8 +8,12 @@
 //! - Claude API 키 입력 칸(비우면 환경 변수 설정대로 실행)
 //! - 모델 칸: 백엔드가 제공하는 모델 목록에서 고르거나 직접 입력. 창을 열 때와 "목록 새로고침"을
 //!   누를 때 목록을 받아 온다
-//! - 프롬프트/답변 textarea (multiline Edit; 답변은 read-only)
-//! - 실행(commit) 버튼 → 워크플로 실행 → 답변 표시 + 처리완료 알람(MessageBox)
+//! - 대화 칸(read-only multiline Edit): 보낸 프롬프트와 받은 답변을 채팅처럼 차례로 쌓는다
+//!   - `▶ 나` / `◀ AI (모델, 걸린 시간)` 머리줄로 말한 쪽을 구분하고, 한 차례가 끝날 때마다
+//!     구분선을 넣는다. 응답을 기다리는 동안은 `◀ AI — 응답을 기다리는 중…`을 보이고, 답이 오면
+//!     그 줄을 답변으로 바꾼다. 실패하면 `◀ 오류`로 남긴다
+//!   - 각 요청은 독립이다. 이전 대화는 LLM에 보내지 않는다
+//! - 프롬프트 입력 칸 + 보내기 버튼. 보내면 입력 칸을 비운다. 처리완료 팝업은 없다
 //!
 //! LLM에는 항상 문서 전체를 커서 위치 표시와 함께 보낸다.
 //!
@@ -23,18 +27,29 @@ use crate::workflow;
 use anyhow::{Result, anyhow};
 use std::cell::RefCell;
 use std::sync::Arc;
+use std::time::Instant;
 use winsafe::{co, gui, prelude::*};
 
-/// 답변 Edit / 실행 Button의 고정 컨트롤 ID.
+/// 보내기 Button의 고정 컨트롤 ID.
 /// 워커 스레드 완료 후 UI 스레드에서 `HWND::GetDlgItem`으로 컨트롤을 찾는 데 쓴다
 /// (winsafe 컨트롤은 Send가 아니라 스레드 경계를 넘길 수 없으므로 ID로 우회).
-const ID_TXT_ANSWER: u16 = 1001;
 const ID_BTN_RUN: u16 = 1002;
+
+/// 대화 칸에서 한 차례(프롬프트 + 답변)가 끝날 때마다 넣는 구분선.
+const TURN_SEPARATOR: &str = "────────────────────────────";
 
 thread_local! {
     /// 모델 칸의 라벨과 콤보박스. winsafe 컨트롤은 스레드를 못 넘기므로, 목록을 받아 온 워커가
     /// `run_ui_thread`로 UI 스레드에 돌아온 뒤 여기서 꺼내 쓴다. UI 스레드에서만 채워진다.
     static MODEL_UI: RefCell<Option<(gui::Label, gui::ComboBox)>> = const { RefCell::new(None) };
+
+    /// 대화 칸과, 응답 대기 줄이 시작하는 위치(UTF-16 글자 수). UI 스레드에서만 쓴다.
+    static CHAT: RefCell<Option<Chat>> = const { RefCell::new(None) };
+}
+
+struct Chat {
+    log: gui::Edit,
+    pending_start: Option<i32>,
 }
 
 /// 메인 윈도우와 컨트롤, 공유 상태(설정)를 보유한다.
@@ -46,8 +61,8 @@ pub struct MainWindow {
     txt_prompt: gui::Edit,
     btn_run: gui::Button,
     #[allow(dead_code)]
-    lbl_answer: gui::Label,
-    txt_answer: gui::Edit,
+    lbl_chat: gui::Label,
+    txt_chat: gui::Edit,
     #[allow(dead_code)]
     lbl_api_key: gui::Label,
     txt_api_key: gui::Edit,
@@ -64,24 +79,25 @@ impl MainWindow {
     pub fn new(cfg: Config) -> Self {
         let wnd = gui::WindowMain::new(gui::WindowMainOpts {
             title: "eat_hwp_raw — HWP AI Agent",
-            size: gui::dpi(520, 544),
+            size: gui::dpi(520, 504),
             ..Default::default()
         });
 
+        // 프롬프트 칸이 창을 열 때 포커스를 받도록 가장 먼저 만든다(배치는 맨 아래).
         let lbl_prompt = gui::Label::new(
             &wnd,
             gui::LabelOpts {
                 text: "프롬프트",
-                position: gui::dpi(10, 108),
+                position: gui::dpi(10, 386),
                 ..Default::default()
             },
         );
         let txt_prompt = gui::Edit::new(
             &wnd,
             gui::EditOpts {
-                position: gui::dpi(10, 126),
-                width: gui::dpi_x(500),
-                height: gui::dpi_y(120),
+                position: gui::dpi(10, 404),
+                width: gui::dpi_x(400),
+                height: gui::dpi_y(70),
                 control_style: co::ES::MULTILINE
                     | co::ES::WANTRETURN
                     | co::ES::AUTOVSCROLL
@@ -92,35 +108,45 @@ impl MainWindow {
         let btn_run = gui::Button::new(
             &wnd,
             gui::ButtonOpts {
-                text: "실행 (Commit)",
-                position: gui::dpi(10, 256),
-                width: gui::dpi_x(140),
+                text: "보내기",
+                position: gui::dpi(420, 404),
+                width: gui::dpi_x(90),
                 ctrl_id: ID_BTN_RUN,
                 ..Default::default()
             },
         );
-        let lbl_answer = gui::Label::new(
+        let lbl_chat = gui::Label::new(
             &wnd,
             gui::LabelOpts {
-                text: "답변",
-                position: gui::dpi(10, 296),
+                text: "대화",
+                position: gui::dpi(10, 108),
                 ..Default::default()
             },
         );
-        let txt_answer = gui::Edit::new(
+        let txt_chat = gui::Edit::new(
             &wnd,
             gui::EditOpts {
-                position: gui::dpi(10, 314),
+                position: gui::dpi(10, 126),
                 width: gui::dpi_x(500),
-                height: gui::dpi_y(200),
+                height: gui::dpi_y(250),
                 control_style: co::ES::MULTILINE
                     | co::ES::AUTOVSCROLL
                     | co::ES::NOHIDESEL
                     | co::ES::READONLY,
-                ctrl_id: ID_TXT_ANSWER,
+                window_style: co::WS::CHILD
+                    | co::WS::VISIBLE
+                    | co::WS::TABSTOP
+                    | co::WS::GROUP
+                    | co::WS::VSCROLL,
                 ..Default::default()
             },
         );
+        CHAT.with_borrow_mut(|chat| {
+            *chat = Some(Chat {
+                log: txt_chat.clone(),
+                pending_start: None,
+            })
+        });
         // 맨 위에 놓이지만 마지막에 만들어, 창을 열면 프롬프트 칸이 먼저 포커스를 받게 한다.
         let lbl_api_key = gui::Label::new(
             &wnd,
@@ -175,8 +201,8 @@ impl MainWindow {
             lbl_prompt,
             txt_prompt,
             btn_run,
-            lbl_answer,
-            txt_answer,
+            lbl_chat,
+            txt_chat,
             lbl_api_key,
             txt_api_key,
             lbl_model,
@@ -196,7 +222,6 @@ impl MainWindow {
     fn events(&self) {
         let wnd = self.wnd.clone();
         let txt_prompt = self.txt_prompt.clone();
-        let txt_answer = self.txt_answer.clone();
         let btn_run = self.btn_run.clone();
         let txt_api_key = self.txt_api_key.clone();
         let cmb_model = self.cmb_model.clone();
@@ -206,8 +231,11 @@ impl MainWindow {
         {
             let wnd2 = wnd.clone();
             let cmb_model = self.cmb_model.clone();
+            let txt_chat = self.txt_chat.clone();
             let cfg = Arc::clone(&self.cfg);
             self.wnd.on().wm_create(move |_| {
+                // 여러 차례 쌓여도 잘리지 않게 글자 수 제한을 최대로 둔다(기본은 약 3만 자).
+                txt_chat.limit_text(None);
                 let _ = cmb_model.hwnd().SetWindowText(&cfg.llm_model);
                 refresh_models(&wnd2, Arc::clone(&cfg));
                 Ok(0)
@@ -234,20 +262,27 @@ impl MainWindow {
             let model = cmb_model.hwnd().GetWindowText().unwrap_or_default();
             let cfg = effective_cfg(&cfg, &api_key, &model);
 
-            // UI 스레드: 즉시 피드백 + 재진입 방지(버튼 비활성화).
-            let _ = txt_answer.set_text("처리 중...");
+            // UI 스레드: 대화 칸에 프롬프트와 대기 줄을 쌓고, 입력 칸을 비우고, 재진입을 막는다.
+            chat_begin(&user_prompt);
+            let _ = txt_prompt.set_text("");
             btn_run.hwnd().EnableWindow(false);
 
             // 워커 스레드로 넘길 Send 상태만 복제.
             let wnd = wnd.clone();
 
             std::thread::spawn(move || {
+                let started = Instant::now();
                 // 키가 실행마다 달라질 수 있어 백엔드는 실행할 때 만든다.
                 let result = RigBackend::new(&cfg)
                     .and_then(|backend| run_workflow(&cfg, &backend, &user_prompt));
+                let header = format!(
+                    "◀ AI ({}, {}초)",
+                    cfg.llm_model,
+                    started.elapsed().as_secs()
+                );
                 let wnd_ui = wnd.clone();
                 wnd.run_ui_thread(move || {
-                    finish_on_ui(&wnd_ui, result);
+                    finish_on_ui(&wnd_ui, &header, result);
                     Ok(())
                 });
             });
@@ -333,31 +368,70 @@ fn fill_models(result: Result<Vec<String>>, default_model: &str) {
     });
 }
 
-/// 워커 결과를 UI 스레드에서 반영한다(버튼 재활성화, 답변 표시, 완료 알람).
-///
-/// 컨트롤은 스레드를 못 넘기므로 고정 ID로 `GetDlgItem`하여 접근한다.
-fn finish_on_ui(wnd: &gui::WindowMain, result: Result<String>) {
-    let root = wnd.hwnd();
-    if let Ok(btn) = root.GetDlgItem(ID_BTN_RUN) {
+/// 워커 결과를 UI 스레드에서 반영한다(버튼 재활성화, 대기 줄을 답변이나 오류로 바꿈).
+fn finish_on_ui(wnd: &gui::WindowMain, header: &str, result: Result<String>) {
+    if let Ok(btn) = wnd.hwnd().GetDlgItem(ID_BTN_RUN) {
         btn.EnableWindow(true);
     }
     match result {
-        Ok(answer) => {
-            if let Ok(ans) = root.GetDlgItem(ID_TXT_ANSWER) {
-                let _ = ans.SetWindowText(&answer);
-            }
-            let _ = root.MessageBox(
-                "처리 완료",
-                "eat_hwp_raw",
-                co::MB::OK | co::MB::ICONINFORMATION,
-            );
-        }
-        Err(e) => {
-            if let Ok(ans) = root.GetDlgItem(ID_TXT_ANSWER) {
-                let _ = ans.SetWindowText(&format!("[오류] {e:#}"));
-            }
-        }
+        Ok(answer) => chat_finish(header, &answer),
+        Err(e) => chat_finish("◀ 오류", &format!("{e:#}")),
     }
+}
+
+/// 대화 칸에 보낸 프롬프트와 응답 대기 줄을 덧붙인다(UI 스레드).
+fn chat_begin(prompt: &str) {
+    CHAT.with_borrow_mut(|chat| {
+        let Some(chat) = chat else {
+            return;
+        };
+        let mut text = String::new();
+        if chat_len(&chat.log) > 0 {
+            text.push_str(TURN_SEPARATOR);
+            text.push_str("\r\n");
+        }
+        let prompt = prompt.trim_end();
+        let prompt = if prompt.trim().is_empty() {
+            "(프롬프트 없음)"
+        } else {
+            prompt
+        };
+        text.push_str(&format!("▶ 나\r\n{}\r\n\r\n", to_crlf(prompt)));
+        chat_append(&chat.log, &text);
+        chat.pending_start = Some(chat_len(&chat.log));
+        chat_append(&chat.log, "◀ AI — 응답을 기다리는 중…\r\n");
+    });
+}
+
+/// 응답 대기 줄을 머리줄과 본문으로 바꾼다(UI 스레드).
+fn chat_finish(header: &str, body: &str) {
+    CHAT.with_borrow_mut(|chat| {
+        let Some(chat) = chat else {
+            return;
+        };
+        let end = chat_len(&chat.log);
+        let start = chat.pending_start.take().unwrap_or(end);
+        chat.log.set_selection(start, end);
+        chat.log
+            .replace_selection(&format!("{header}\r\n{}\r\n\r\n", to_crlf(body.trim_end())));
+    });
+}
+
+/// 대화 칸 끝에 글을 덧붙인다. 바뀐 자리로 스크롤된다.
+fn chat_append(log: &gui::Edit, text: &str) {
+    let end = chat_len(log);
+    log.set_selection(end, end);
+    log.replace_selection(text);
+}
+
+/// 대화 칸의 글자 수(UTF-16 단위). Edit의 선택 위치와 같은 단위다.
+fn chat_len(log: &gui::Edit) -> i32 {
+    log.hwnd().GetWindowTextLength().unwrap_or(0)
+}
+
+/// 여러 줄 Edit는 줄바꿈으로 `\r\n`만 인식한다.
+fn to_crlf(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\n', "\r\n")
 }
 
 /// 문서 내용(HWPML)과 커서 위치를 확보해 워크플로를 실행한다.
