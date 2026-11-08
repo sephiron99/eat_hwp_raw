@@ -13,6 +13,7 @@
 //! 현재 구현의 흐름: GUI에 프롬프트 입력 → HWPML 컨텍스트 파싱 → rig LLM 실행 →
 //! 답변 표시 + 완료 알람.
 
+mod chat_store;
 mod config;
 mod gui;
 mod hwp;

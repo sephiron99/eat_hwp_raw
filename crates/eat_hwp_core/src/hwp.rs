@@ -19,6 +19,8 @@ pub struct DocSnapshot {
     pub hwpml: String,
     /// `hwpml` 안에서 커서가 있는 바이트 위치. 커서를 알 수 없으면 `None`.
     pub caret: Option<usize>,
+    /// 문서 파일 경로. 한 번도 저장하지 않은 문서는 빈 문자열. 대화 기록을 문서별로 나누는 데 쓴다.
+    pub path: String,
 }
 
 /// 실행 중인 한글 인스턴스에 연결한다.
@@ -44,5 +46,12 @@ pub fn document_snapshot(hwp: &HwpObject) -> Result<DocSnapshot> {
     Ok(DocSnapshot {
         hwpml: caret.hwpml,
         caret: Some(caret.offset),
+        path: hwp.path().unwrap_or_default(),
     })
+}
+
+/// 실행 중인 한글의 현재 문서 파일 경로. 저장하지 않은 문서는 빈 문자열.
+pub fn current_document_path() -> Result<String> {
+    let hwp = connect()?;
+    hwp.path().map_err(|e| anyhow!("문서 경로를 읽지 못함: {e}"))
 }

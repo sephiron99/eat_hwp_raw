@@ -15,6 +15,9 @@
 //!     구분선을 넣는다. 응답을 기다리는 동안은 `◀ AI — 응답을 기다리는 중…`을 보이고, 답이 오면
 //!     그 줄을 답변으로 바꾼다. 실패하면 `◀ 오류`로 남긴다
 //!   - 각 요청은 독립이다. 이전 대화는 LLM에 보내지 않는다
+//!   - 대화는 문서와 API 종류(로컬/OpenAI 호환, Claude)마다 `chat_store`가 정한 파일에 저장되고,
+//!     같은 문서·API로 돌아오면 다시 불러온다. 창을 열 때 한글의 현재 문서를, 요청을 보낼 때 읽은
+//!     문서를, 상태를 점검할 때 그 설정의 API 종류를 기준으로 바꾼다
 //! - 프롬프트 입력 칸 + 보내기 버튼. 보내면 입력 칸을 비운다. 처리완료 팝업은 없다
 //!
 //! LLM에는 항상 문서 전체를 커서 위치 표시와 함께 보낸다.
@@ -22,12 +25,14 @@
 //! 문서 내용은 `hwp` 모듈이 실행 중인 한글에서 `GetTextFile`(HWPML2X)로 읽어 온다. 한글 없이
 //! 테스트할 때는 환경변수 `EAT_HWP_DOC`에 HWPML 파일(UTF-8) 경로를 지정하면 그 파일을 사용한다.
 
-use crate::config::Config;
+use crate::chat_store;
+use crate::config::{Config, Provider};
 use crate::hwp::{self, DocSnapshot};
 use crate::llm::{self, LlmBackend, RigBackend, ServerState, ServerStatus};
 use crate::workflow;
 use anyhow::{Result, anyhow};
 use std::cell::RefCell;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 use winsafe::{co, gui, prelude::*};
@@ -52,6 +57,12 @@ thread_local! {
 struct Chat {
     log: gui::Edit,
     pending_start: Option<i32>,
+    /// 대화 칸이 지금 보여 주는 문서의 경로. 아직 모르면 `None`.
+    doc_path: Option<String>,
+    /// 지금 설정의 API 종류.
+    provider: Provider,
+    /// `doc_path`와 `provider`로 정한 기록 파일. 문서를 아직 모르면 `None`(저장하지 않음).
+    file: Option<PathBuf>,
 }
 
 /// 메인 윈도우와 컨트롤, 공유 상태(설정)를 보유한다.
@@ -149,6 +160,9 @@ impl MainWindow {
             *chat = Some(Chat {
                 log: txt_chat.clone(),
                 pending_start: None,
+                doc_path: None,
+                provider: cfg.llm_provider,
+                file: None,
             })
         });
         // 맨 위에 놓이지만 마지막에 만들어, 창을 열면 프롬프트 칸이 먼저 포커스를 받게 한다.
@@ -253,6 +267,7 @@ impl MainWindow {
                 txt_chat.limit_text(None);
                 let _ = cmb_model.hwnd().SetWindowText(&cfg.llm_model);
                 check_server(&wnd2, Arc::clone(&cfg));
+                load_current_document_chat(&wnd2);
                 Ok(0)
             });
         }
@@ -293,8 +308,8 @@ impl MainWindow {
             let model = cmb_model.hwnd().GetWindowText().unwrap_or_default();
             let cfg = effective_cfg(&cfg, &api_key, &model);
 
-            // UI 스레드: 대화 칸에 프롬프트와 대기 줄을 쌓고, 입력 칸을 비우고, 재진입을 막는다.
-            chat_begin(&user_prompt);
+            // UI 스레드: 입력 칸을 비우고 재진입을 막는다. 프롬프트는 문서를 읽은 뒤 그 문서의
+            // 대화에 쌓는다.
             let _ = txt_prompt.set_text("");
             btn_run.hwnd().EnableWindow(false);
 
@@ -303,9 +318,26 @@ impl MainWindow {
 
             std::thread::spawn(move || {
                 let started = Instant::now();
+                let doc = acquire_document();
+                // 읽은 문서와 API 종류의 대화로 바꾼 뒤 프롬프트를 쌓는다. 읽기에 실패하면 지금
+                // 대화에 쌓고 오류로 마친다.
+                {
+                    let doc_path = doc.as_ref().ok().map(|d| d.path.clone());
+                    let provider = cfg.llm_provider;
+                    let user_prompt = user_prompt.clone();
+                    wnd.run_ui_thread(move || {
+                        if let Some(path) = doc_path {
+                            chat_set_context(Some(path), provider);
+                        }
+                        chat_begin(&user_prompt);
+                        Ok(())
+                    });
+                }
                 // 키가 실행마다 달라질 수 있어 백엔드는 실행할 때 만든다.
-                let result = RigBackend::new(&cfg)
-                    .and_then(|backend| run_workflow(&cfg, &backend, &user_prompt));
+                let result = doc.and_then(|doc| {
+                    RigBackend::new(&cfg)
+                        .and_then(|backend| run_workflow(&cfg, &backend, &doc, &user_prompt))
+                });
                 let secs = started.elapsed().as_secs();
                 let header = format!("◀ AI ({}, {secs}초)", cfg.llm_model);
                 let wnd_ui = wnd.clone();
@@ -347,6 +379,8 @@ fn effective_cfg(base: &Arc<Config>, api_key: &str, model: &str) -> Arc<Config> 
 /// 워커 스레드에서 서버를 점검하고, UI 스레드에서 상태 줄과 모델 칸을 채운다.
 fn check_server(wnd: &gui::WindowMain, cfg: Arc<Config>) {
     set_status(&format!("LLM 상태: … 확인 중 — {}", llm::describe_target(&cfg)));
+    // API 종류가 바뀌었으면 그 종류의 대화로 바꾼다.
+    chat_set_provider(cfg.llm_provider);
     let wnd = wnd.clone();
     std::thread::spawn(move || {
         let status = llm::check_server(&cfg);
@@ -434,6 +468,79 @@ fn finish_on_ui(wnd: &gui::WindowMain, header: &str, result: Result<String>) {
         Ok(answer) => chat_finish(header, &answer),
         Err(e) => chat_finish("◀ 오류", &format!("{e:#}")),
     }
+    chat_save();
+}
+
+/// 워커 스레드에서 한글의 현재 문서 경로를 읽어, UI 스레드에서 그 문서의 대화를 불러온다.
+/// 한글에 붙지 못하면 문서를 모르는 채로 둔다(첫 요청 때 정해진다).
+fn load_current_document_chat(wnd: &gui::WindowMain) {
+    let wnd = wnd.clone();
+    std::thread::spawn(move || {
+        let path = match std::env::var("EAT_HWP_DOC") {
+            Ok(p) if !p.is_empty() => Some(p),
+            _ => hwp::current_document_path().ok(),
+        };
+        if let Some(path) = path {
+            wnd.run_ui_thread(move || {
+                let provider = CHAT.with_borrow(|chat| chat.as_ref().map(|c| c.provider));
+                if let Some(provider) = provider {
+                    chat_set_context(Some(path), provider);
+                }
+                Ok(())
+            });
+        }
+    });
+}
+
+/// API 종류만 바꾼다(UI 스레드).
+fn chat_set_provider(provider: Provider) {
+    let doc_path = CHAT.with_borrow(|chat| chat.as_ref().and_then(|c| c.doc_path.clone()));
+    chat_set_context(doc_path, provider);
+}
+
+/// 대화 칸의 문서와 API 종류를 정하고, 기록 파일이 바뀌면 그 파일의 대화를 불러온다(UI 스레드).
+///
+/// 응답을 기다리는 중에는 바꾸지 않는다. 대기 줄이 다른 대화로 넘어가기 때문이다.
+fn chat_set_context(doc_path: Option<String>, provider: Provider) {
+    CHAT.with_borrow_mut(|chat| {
+        let Some(chat) = chat else {
+            return;
+        };
+        if chat.pending_start.is_some() {
+            return;
+        }
+        chat.doc_path = doc_path;
+        chat.provider = provider;
+        let file = chat
+            .doc_path
+            .as_deref()
+            .and_then(|path| chat_store::chat_file(path, provider));
+        if file == chat.file {
+            return;
+        }
+        chat.file = file;
+        let text = chat
+            .file
+            .as_deref()
+            .map(chat_store::load)
+            .unwrap_or_default();
+        let _ = chat.log.set_text(&to_crlf(&text));
+        // 끝으로 스크롤한다.
+        chat_append(&chat.log, "");
+    });
+}
+
+/// 대화 칸의 글을 기록 파일에 쓴다(UI 스레드). 실패하면 상태 줄에 알린다.
+fn chat_save() {
+    let saved = CHAT.with_borrow(|chat| {
+        let chat = chat.as_ref()?;
+        let file = chat.file.as_deref()?;
+        let text = chat.log.hwnd().GetWindowText().unwrap_or_default();
+        Some(chat_store::save(file, &text))
+    });
+    if let Some(Err(e)) = saved {
+        set_status(&format!("대화 기록 저장 실패: {e:#}"));
+    }
 }
 
 /// 대화 칸에 보낸 프롬프트와 응답 대기 줄을 덧붙인다(UI 스레드).
@@ -491,13 +598,13 @@ fn to_crlf(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\n', "\r\n")
 }
 
-/// 문서 내용(HWPML)과 커서 위치를 확보해 워크플로를 실행한다.
+/// 확보한 문서 내용(HWPML)과 커서 위치로 워크플로를 실행한다.
 fn run_workflow(
     cfg: &Config,
     backend: &dyn LlmBackend,
+    doc: &DocSnapshot,
     user_prompt: &str,
 ) -> Result<String> {
-    let doc = acquire_document()?;
     workflow::run_prompt(cfg, backend, &doc.hwpml, user_prompt, doc.caret)
 }
 
@@ -511,7 +618,11 @@ fn acquire_document() -> Result<DocSnapshot> {
             // 테스트 경로: 기존 HWPML 파일만 사용하고 라이브 커서 위치는 없다.
             let hwpml = std::fs::read_to_string(&p)
                 .map_err(|e| anyhow!("EAT_HWP_DOC 파일을 읽지 못함: {p}: {e}"))?;
-            return Ok(DocSnapshot { hwpml, caret: None });
+            return Ok(DocSnapshot {
+                hwpml,
+                caret: None,
+                path: p,
+            });
         }
     }
     let hwp = hwp::connect()?;
