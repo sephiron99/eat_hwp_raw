@@ -8,6 +8,7 @@ use crate::config::{Config, Provider};
 use anyhow::{Result, anyhow, bail};
 use rig::completion::{CompletionRequest, Reasoning};
 use rig::driver::Model;
+use rig::error::ProviderError;
 use rig::providers::anthropic::{Anthropic, AnthropicConfig};
 use rig::providers::anthropic::wire::Messages;
 use rig::providers::openai::{OpenAI, OpenAIConfig};
@@ -85,21 +86,104 @@ impl LlmBackend for RigBackend {
     }
 }
 
-/// 설정의 백엔드가 제공하는 모델 ID 목록을 이름순으로 돌려준다.
+/// LLM 서버 점검 결과.
+pub struct ServerStatus {
+    /// 점검한 대상. 예: `로컬 LLM 서버 http://localhost:11434/v1`, `Claude API`
+    pub target: String,
+    pub state: ServerState,
+    /// 응답(또는 실패)까지 걸린 시간(밀리초).
+    pub elapsed_ms: u128,
+}
+
+/// 점검한 서버의 상태.
+pub enum ServerState {
+    /// 응답했다. 서버가 제공하는 모델 ID 목록(이름순).
+    Working(Vec<String>),
+    /// Claude API 키가 없다.
+    NoKey,
+    /// 서버에 닿지 못했다(꺼져 있거나 주소·네트워크 문제).
+    Unreachable(String),
+    /// 서버가 키를 거부했다(HTTP 401/403).
+    AuthFailed(String),
+    /// 그 밖의 실패.
+    Failed(String),
+}
+
+/// 설정의 백엔드에 모델 목록을 요청해 서버 상태를 점검한다.
 ///
-/// OpenAI 호환 서버는 `GET {base_url}/models`(Ollama는 받아 둔 모델), Claude API는 Models API를 쓴다.
-pub fn list_models(cfg: &Config) -> Result<Vec<String>> {
-    let runtime =
-        tokio::runtime::Runtime::new().map_err(|e| anyhow!("tokio 런타임 생성 실패: {e}"))?;
+/// OpenAI 호환 서버는 `GET {base_url}/models`(Ollama는 받아 둔 모델), Claude API는 Models API를
+/// 쓴다. 목록을 받으면 서버가 작동하고 키도 통과한 것으로 본다.
+pub fn check_server(cfg: &Config) -> ServerStatus {
+    let target = describe_target(cfg);
+    let started = std::time::Instant::now();
+    let state = match fetch_models(cfg) {
+        Ok(models) => ServerState::Working(models),
+        Err(state) => state,
+    };
+    ServerStatus {
+        target,
+        state,
+        elapsed_ms: started.elapsed().as_millis(),
+    }
+}
+
+fn fetch_models(cfg: &Config) -> std::result::Result<Vec<String>, ServerState> {
+    let runtime = tokio::runtime::Runtime::new()
+        .map_err(|e| ServerState::Failed(format!("tokio 런타임 생성 실패: {e}")))?;
     let list = match cfg.llm_provider {
         Provider::OpenAiCompatible => runtime.block_on(openai_client(cfg).list_models()),
-        Provider::Anthropic => runtime.block_on(anthropic_client(cfg)?.list_models()),
+        Provider::Anthropic => {
+            let client = anthropic_client(cfg).map_err(|_| ServerState::NoKey)?;
+            runtime.block_on(client.list_models())
+        }
     }
-    .map_err(|e| anyhow!("모델 목록 조회 실패: {e}"))?;
+    .map_err(|e| classify(&e))?;
     let mut ids: Vec<String> = list.data.into_iter().map(|m| m.id).collect();
     ids.sort();
     ids.dedup();
     Ok(ids)
+}
+
+/// rig 오류를 서버 상태로 나눈다.
+fn classify(error: &ProviderError) -> ServerState {
+    let text = shorten(&error.to_string());
+    match error {
+        ProviderError::Http(_) => ServerState::Unreachable(text),
+        ProviderError::InvalidAuthentication(_) => ServerState::AuthFailed(text),
+        ProviderError::ProviderResponse(response) => match response.status.map(|s| s.as_u16()) {
+            Some(401 | 403) => ServerState::AuthFailed(text),
+            _ => ServerState::Failed(text),
+        },
+        _ => ServerState::Failed(text),
+    }
+}
+
+/// 상태 표시줄에 넣을 수 있게 오류 문구를 줄인다.
+fn shorten(text: &str) -> String {
+    const MAX: usize = 120;
+    match text.char_indices().nth(MAX) {
+        Some((cut, _)) => format!("{}…", &text[..cut]),
+        None => text.to_string(),
+    }
+}
+
+/// 설정이 가리키는 LLM 서버를 사람이 읽을 수 있게 적는다.
+pub fn describe_target(cfg: &Config) -> String {
+    match cfg.llm_provider {
+        Provider::OpenAiCompatible => {
+            let url = cfg.llm_base_url.as_str();
+            let local = ["://localhost", "://127.", "://[::1]"]
+                .iter()
+                .any(|host| url.contains(host));
+            if local {
+                format!("로컬 LLM 서버 {url}")
+            } else {
+                format!("원격 LLM 서버(OpenAI 호환) {url}")
+            }
+        }
+        Provider::Anthropic if cfg.llm_base_url.is_empty() => "Claude API".to_string(),
+        Provider::Anthropic => format!("Claude API {}", cfg.llm_base_url),
+    }
 }
 
 /// OpenAI 호환 클라이언트. 키가 비어 있어도 된다(로컬 서버).

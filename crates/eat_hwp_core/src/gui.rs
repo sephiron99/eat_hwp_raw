@@ -6,8 +6,10 @@
 //!
 //! 구성:
 //! - Claude API 키 입력 칸(비우면 환경 변수 설정대로 실행)
-//! - 모델 칸: 백엔드가 제공하는 모델 목록에서 고르거나 직접 입력. 창을 열 때와 "목록 새로고침"을
-//!   누를 때 목록을 받아 온다
+//! - 모델 칸: 백엔드가 제공하는 모델 목록에서 고르거나 직접 입력
+//! - LLM 상태 줄: 지금 설정(키 칸 포함)이 가리키는 서버가 작동하는지 보인다. 창을 열 때, "상태 확인"을
+//!   누를 때, 키 칸에서 나갈 때 서버에 모델 목록을 요청해 점검하고(모델 칸 목록도 이때 채운다),
+//!   요청이 성공하면 "작동 중"으로, 실패하면 다시 점검해 원인(연결 안 됨, 인증 실패 등)을 보인다
 //! - 대화 칸(read-only multiline Edit): 보낸 프롬프트와 받은 답변을 채팅처럼 차례로 쌓는다
 //!   - `▶ 나` / `◀ AI (모델, 걸린 시간)` 머리줄로 말한 쪽을 구분하고, 한 차례가 끝날 때마다
 //!     구분선을 넣는다. 응답을 기다리는 동안은 `◀ AI — 응답을 기다리는 중…`을 보이고, 답이 오면
@@ -22,7 +24,7 @@
 
 use crate::config::Config;
 use crate::hwp::{self, DocSnapshot};
-use crate::llm::{self, LlmBackend, RigBackend};
+use crate::llm::{self, LlmBackend, RigBackend, ServerState, ServerStatus};
 use crate::workflow;
 use anyhow::{Result, anyhow};
 use std::cell::RefCell;
@@ -39,9 +41,9 @@ const ID_BTN_RUN: u16 = 1002;
 const TURN_SEPARATOR: &str = "────────────────────────────";
 
 thread_local! {
-    /// 모델 칸의 라벨과 콤보박스. winsafe 컨트롤은 스레드를 못 넘기므로, 목록을 받아 온 워커가
+    /// 모델 콤보박스와 LLM 상태 줄. winsafe 컨트롤은 스레드를 못 넘기므로, 서버를 점검한 워커가
     /// `run_ui_thread`로 UI 스레드에 돌아온 뒤 여기서 꺼내 쓴다. UI 스레드에서만 채워진다.
-    static MODEL_UI: RefCell<Option<(gui::Label, gui::ComboBox)>> = const { RefCell::new(None) };
+    static SERVER_UI: RefCell<Option<(gui::ComboBox, gui::Label)>> = const { RefCell::new(None) };
 
     /// 대화 칸과, 응답 대기 줄이 시작하는 위치(UTF-16 글자 수). UI 스레드에서만 쓴다.
     static CHAT: RefCell<Option<Chat>> = const { RefCell::new(None) };
@@ -70,6 +72,8 @@ pub struct MainWindow {
     lbl_model: gui::Label,
     cmb_model: gui::ComboBox,
     btn_models: gui::Button,
+    #[allow(dead_code)]
+    lbl_status: gui::Label,
     // 워커 스레드로 넘기기 위해 Arc(Send+Sync).
     cfg: Arc<Config>,
 }
@@ -119,16 +123,16 @@ impl MainWindow {
             &wnd,
             gui::LabelOpts {
                 text: "대화",
-                position: gui::dpi(10, 108),
+                position: gui::dpi(10, 126),
                 ..Default::default()
             },
         );
         let txt_chat = gui::Edit::new(
             &wnd,
             gui::EditOpts {
-                position: gui::dpi(10, 126),
+                position: gui::dpi(10, 144),
                 width: gui::dpi_x(500),
-                height: gui::dpi_y(250),
+                height: gui::dpi_y(232),
                 control_style: co::ES::MULTILINE
                     | co::ES::AUTOVSCROLL
                     | co::ES::NOHIDESEL
@@ -188,13 +192,23 @@ impl MainWindow {
         let btn_models = gui::Button::new(
             &wnd,
             gui::ButtonOpts {
-                text: "목록 새로고침",
+                text: "상태 확인",
                 position: gui::dpi(400, 75),
                 width: gui::dpi_x(110),
                 ..Default::default()
             },
         );
-        MODEL_UI.with_borrow_mut(|ui| *ui = Some((lbl_model.clone(), cmb_model.clone())));
+        let lbl_status = gui::Label::new(
+            &wnd,
+            gui::LabelOpts {
+                text: "LLM 상태: 확인 전",
+                position: gui::dpi(10, 104),
+                // 상태 문구가 바뀌어 길어지므로 폭을 고정한다.
+                size: gui::dpi(500, 16),
+                ..Default::default()
+            },
+        );
+        SERVER_UI.with_borrow_mut(|ui| *ui = Some((cmb_model.clone(), lbl_status.clone())));
 
         let new_self = Self {
             wnd,
@@ -208,6 +222,7 @@ impl MainWindow {
             lbl_model,
             cmb_model,
             btn_models,
+            lbl_status,
             cfg: Arc::new(cfg),
         };
         new_self.events();
@@ -237,19 +252,35 @@ impl MainWindow {
                 // 여러 차례 쌓여도 잘리지 않게 글자 수 제한을 최대로 둔다(기본은 약 3만 자).
                 txt_chat.limit_text(None);
                 let _ = cmb_model.hwnd().SetWindowText(&cfg.llm_model);
-                refresh_models(&wnd2, Arc::clone(&cfg));
+                check_server(&wnd2, Arc::clone(&cfg));
                 Ok(0)
             });
         }
 
-        // 목록 새로고침: 키 칸의 값까지 반영한 설정으로 다시 받아 온다(키를 넣으면 Claude 목록).
+        // 상태 확인: 키 칸의 값까지 반영한 설정으로 서버를 점검한다(키를 넣으면 Claude API).
         {
             let wnd2 = wnd.clone();
             let txt_api_key = self.txt_api_key.clone();
             let cfg = Arc::clone(&self.cfg);
             self.btn_models.on().bn_clicked(move || {
                 let key = txt_api_key.text().unwrap_or_default();
-                refresh_models(&wnd2, effective_cfg(&cfg, &key, ""));
+                check_server(&wnd2, effective_cfg(&cfg, &key, ""));
+                Ok(())
+            });
+        }
+
+        // 키 칸에서 나가면 바뀐 키로 다시 점검한다. 같은 키면 다시 묻지 않는다.
+        {
+            let wnd2 = wnd.clone();
+            let txt_api_key = self.txt_api_key.clone();
+            let cfg = Arc::clone(&self.cfg);
+            let last_key = RefCell::new(String::new());
+            self.txt_api_key.on().en_kill_focus(move || {
+                let key = txt_api_key.text().unwrap_or_default();
+                if *last_key.borrow() != key {
+                    *last_key.borrow_mut() = key.clone();
+                    check_server(&wnd2, effective_cfg(&cfg, &key, ""));
+                }
                 Ok(())
             });
         }
@@ -275,13 +306,18 @@ impl MainWindow {
                 // 키가 실행마다 달라질 수 있어 백엔드는 실행할 때 만든다.
                 let result = RigBackend::new(&cfg)
                     .and_then(|backend| run_workflow(&cfg, &backend, &user_prompt));
-                let header = format!(
-                    "◀ AI ({}, {}초)",
-                    cfg.llm_model,
-                    started.elapsed().as_secs()
-                );
+                let secs = started.elapsed().as_secs();
+                let header = format!("◀ AI ({}, {secs}초)", cfg.llm_model);
                 let wnd_ui = wnd.clone();
                 wnd.run_ui_thread(move || {
+                    match &result {
+                        Ok(_) => set_status(&format!(
+                            "LLM 상태: ✔ 작동 중 — {} · 마지막 요청 성공({secs}초)",
+                            llm::describe_target(&cfg)
+                        )),
+                        // 실패하면 서버를 다시 점검해 원인을 상태 줄에 보인다.
+                        Err(_) => check_server(&wnd_ui, Arc::clone(&cfg)),
+                    }
                     finish_on_ui(&wnd_ui, &header, result);
                     Ok(())
                 });
@@ -308,64 +344,85 @@ fn effective_cfg(base: &Arc<Config>, api_key: &str, model: &str) -> Arc<Config> 
     Arc::new(cfg)
 }
 
-/// 워커 스레드에서 모델 목록을 받아 와 UI 스레드에서 모델 칸을 채운다.
-fn refresh_models(wnd: &gui::WindowMain, cfg: Arc<Config>) {
-    set_model_status("모델 (목록을 불러오는 중…)");
+/// 워커 스레드에서 서버를 점검하고, UI 스레드에서 상태 줄과 모델 칸을 채운다.
+fn check_server(wnd: &gui::WindowMain, cfg: Arc<Config>) {
+    set_status(&format!("LLM 상태: … 확인 중 — {}", llm::describe_target(&cfg)));
     let wnd = wnd.clone();
     std::thread::spawn(move || {
-        let result = llm::list_models(&cfg);
+        let status = llm::check_server(&cfg);
         let default_model = cfg.llm_model.clone();
         wnd.run_ui_thread(move || {
-            fill_models(result, &default_model);
+            show_status(status, &default_model);
             Ok(())
         });
     });
 }
 
-fn set_model_status(text: &str) {
-    MODEL_UI.with_borrow(|ui| {
-        if let Some((lbl, _)) = ui {
+fn set_status(text: &str) {
+    SERVER_UI.with_borrow(|ui| {
+        if let Some((_, lbl)) = ui {
             let _ = lbl.hwnd().SetWindowText(text);
         }
     });
 }
 
-/// 받아 온 모델 목록으로 모델 칸을 채운다(UI 스레드).
+/// 점검 결과를 상태 줄에 보이고, 성공했으면 모델 칸 목록을 채운다(UI 스레드).
 ///
 /// 칸에 있던 모델이 새 목록에 있으면 그대로 두고, 없으면(백엔드가 바뀐 경우 등) 설정의 기본
-/// 모델로 바꾼다. 실패하면 목록은 그대로 두고 라벨에 오류를 보인다.
-fn fill_models(result: Result<Vec<String>>, default_model: &str) {
-    MODEL_UI.with_borrow(|ui| {
-        let Some((lbl, cmb)) = ui else {
-            return;
+/// 모델로 바꾼다. 그 모델도 목록에 없으면 상태 줄에 경고를 붙인다.
+fn show_status(status: ServerStatus, default_model: &str) {
+    let ServerStatus {
+        target,
+        state,
+        elapsed_ms,
+    } = status;
+    let text = match state {
+        ServerState::Working(models) => {
+            let missing = !fill_models(&models, default_model);
+            format!(
+                "LLM 상태: ✔ 작동 중 — {target} (응답 {elapsed_ms}ms, 모델 {}개){}",
+                models.len(),
+                if missing { " · ⚠ 선택한 모델이 목록에 없음" } else { "" }
+            )
+        }
+        ServerState::NoKey => "LLM 상태: ✖ 키 없음 — Claude API 키를 입력하세요".to_string(),
+        ServerState::Unreachable(e) => {
+            format!("LLM 상태: ✖ 연결 안 됨 — {target} (서버가 꺼져 있거나 주소가 틀림): {e}")
+        }
+        ServerState::AuthFailed(e) => {
+            format!("LLM 상태: ✖ 인증 실패 — {target} (키를 확인하세요): {e}")
+        }
+        ServerState::Failed(e) => format!("LLM 상태: ✖ 오류 — {target}: {e}"),
+    };
+    set_status(&text);
+}
+
+/// 모델 칸 목록을 `models`로 바꾼다. 칸에 남은 모델이 목록에 있으면 `true`.
+fn fill_models(models: &[String], default_model: &str) -> bool {
+    SERVER_UI.with_borrow(|ui| {
+        let Some((cmb, _)) = ui else {
+            return true;
         };
-        match result {
-            Ok(models) => {
-                let current = cmb.hwnd().GetWindowText().unwrap_or_default();
-                let current = current.trim();
-                let keep = if models.iter().any(|m| m == current) {
-                    current.to_string()
-                } else {
-                    default_model.to_string()
-                };
-                cmb.items().delete_all();
-                let _ = cmb.items().add(&models);
-                match models.iter().position(|m| *m == keep) {
-                    Some(i) => cmb.items().select(Some(i as u32)),
-                    None => {
-                        let _ = cmb.hwnd().SetWindowText(&keep);
-                    }
-                }
-                let _ = lbl.hwnd().SetWindowText(&format!(
-                    "모델 (목록 {}개 — 고르거나 직접 입력)",
-                    models.len()
-                ));
+        let current = cmb.hwnd().GetWindowText().unwrap_or_default();
+        let current = current.trim();
+        let keep = if models.iter().any(|m| m == current) {
+            current.to_string()
+        } else {
+            default_model.to_string()
+        };
+        cmb.items().delete_all();
+        let _ = cmb.items().add(models);
+        match models.iter().position(|m| *m == keep) {
+            Some(i) => {
+                cmb.items().select(Some(i as u32));
+                true
             }
-            Err(e) => {
-                let _ = lbl.hwnd().SetWindowText(&format!("모델 (목록 실패: {e:#})"));
+            None => {
+                let _ = cmb.hwnd().SetWindowText(&keep);
+                false
             }
         }
-    });
+    })
 }
 
 /// 워커 결과를 UI 스레드에서 반영한다(버튼 재활성화, 대기 줄을 답변이나 오류로 바꿈).
