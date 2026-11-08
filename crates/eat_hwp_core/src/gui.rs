@@ -11,7 +11,8 @@
 //!   누를 때, 키 칸에서 나갈 때 서버에 모델 목록을 요청해 점검하고(모델 칸 목록도 이때 채운다),
 //!   요청이 성공하면 "작동 중"으로, 실패하면 다시 점검해 원인(연결 안 됨, 인증 실패 등)을 보인다
 //! - 대화 칸(read-only multiline Edit): 보낸 프롬프트와 받은 답변을 채팅처럼 차례로 쌓는다
-//!   - `▶ 나` / `◀ AI (모델, 걸린 시간)` 머리줄로 말한 쪽을 구분하고, 한 차례가 끝날 때마다
+//!   - `▶ 나 · 시각` / `◀ AI (모델, 걸린 시간) · 시각` 머리줄로 말한 쪽과 그 글이 대화 칸에 나온
+//!     시각(시스템 로컬 시간, 초 단위)을 보이고, 한 차례가 끝날 때마다
 //!     구분선을 넣는다. 응답을 기다리는 동안은 `◀ AI — 응답을 기다리는 중…`을 보이고, 답이 오면
 //!     그 줄을 답변으로 바꾼다. 실패하면 `◀ 오류`로 남긴다
 //!   - 각 요청은 독립이다. 이전 대화는 LLM에 보내지 않는다
@@ -108,6 +109,15 @@ impl MainWindow {
             accel_table,
             title: "eat_hwp_raw — HWP AI Agent",
             size: gui::dpi(520, 504),
+            // 크기 조절 테두리와 최대화 버튼. 대화 칸이 늘고 줄며, 아래 줄은 바닥에 붙어 움직인다.
+            style: co::WS::CAPTION
+                | co::WS::SYSMENU
+                | co::WS::CLIPCHILDREN
+                | co::WS::BORDER
+                | co::WS::VISIBLE
+                | co::WS::SIZEBOX
+                | co::WS::MINIMIZEBOX
+                | co::WS::MAXIMIZEBOX,
             ..Default::default()
         });
 
@@ -117,6 +127,7 @@ impl MainWindow {
             gui::LabelOpts {
                 text: "프롬프트 (Ctrl+Enter로 보내기)",
                 position: gui::dpi(10, 386),
+                resize_behavior: (gui::Horz::None, gui::Vert::Repos),
                 ..Default::default()
             },
         );
@@ -124,6 +135,7 @@ impl MainWindow {
             &wnd,
             gui::EditOpts {
                 position: gui::dpi(10, 404),
+                resize_behavior: (gui::Horz::Resize, gui::Vert::Repos),
                 width: gui::dpi_x(400),
                 height: gui::dpi_y(70),
                 control_style: co::ES::MULTILINE
@@ -138,6 +150,7 @@ impl MainWindow {
             gui::ButtonOpts {
                 text: "보내기",
                 position: gui::dpi(420, 404),
+                resize_behavior: (gui::Horz::Repos, gui::Vert::Repos),
                 width: gui::dpi_x(90),
                 ctrl_id: ID_BTN_RUN,
                 ..Default::default()
@@ -155,6 +168,7 @@ impl MainWindow {
             &wnd,
             gui::EditOpts {
                 position: gui::dpi(10, 144),
+                resize_behavior: (gui::Horz::Resize, gui::Vert::Resize),
                 width: gui::dpi_x(500),
                 height: gui::dpi_y(232),
                 control_style: co::ES::MULTILINE
@@ -191,6 +205,7 @@ impl MainWindow {
             &wnd,
             gui::EditOpts {
                 position: gui::dpi(10, 26),
+                resize_behavior: (gui::Horz::Resize, gui::Vert::None),
                 width: gui::dpi_x(500),
                 control_style: co::ES::AUTOHSCROLL | co::ES::PASSWORD,
                 ..Default::default()
@@ -201,6 +216,7 @@ impl MainWindow {
             gui::LabelOpts {
                 text: "모델 (목록에서 고르거나 직접 입력)",
                 position: gui::dpi(10, 58),
+                resize_behavior: (gui::Horz::Resize, gui::Vert::None),
                 // 나중에 더 긴 상태 문구로 바뀌므로 글자 길이에 맞추지 않고 폭을 고정한다.
                 size: gui::dpi(500, 16),
                 ..Default::default()
@@ -210,6 +226,7 @@ impl MainWindow {
             &wnd,
             gui::ComboBoxOpts {
                 position: gui::dpi(10, 76),
+                resize_behavior: (gui::Horz::Resize, gui::Vert::None),
                 width: gui::dpi_x(380),
                 // 목록에 없는 모델 이름도 직접 입력할 수 있게 편집형으로 둔다.
                 control_style: co::CBS::DROPDOWN,
@@ -221,6 +238,7 @@ impl MainWindow {
             gui::ButtonOpts {
                 text: "상태 확인",
                 position: gui::dpi(400, 75),
+                resize_behavior: (gui::Horz::Repos, gui::Vert::None),
                 width: gui::dpi_x(110),
                 ..Default::default()
             },
@@ -230,6 +248,7 @@ impl MainWindow {
             gui::LabelOpts {
                 text: "LLM 상태: 확인 전",
                 position: gui::dpi(10, 104),
+                resize_behavior: (gui::Horz::Resize, gui::Vert::None),
                 // 상태 문구가 바뀌어 길어지므로 폭을 고정한다.
                 size: gui::dpi(500, 16),
                 ..Default::default()
@@ -312,6 +331,13 @@ impl MainWindow {
                 Ok(())
             });
         }
+
+        // 창을 너무 작게 줄여 컨트롤이 겹치지 않게 최소 크기를 둔다(창 테두리 포함 크기).
+        self.wnd.on().wm_get_min_max_info(|p| {
+            let (w, h) = gui::dpi(440, 440);
+            p.info.ptMinTrackSize = winsafe::POINT::with(w, h);
+            Ok(())
+        });
 
         // Ctrl+Enter: 보내기 버튼이 켜져 있을 때(응답 대기 중이 아닐 때)만 누른다.
         {
@@ -612,7 +638,7 @@ fn chat_begin(prompt: &str) {
         } else {
             prompt
         };
-        text.push_str(&format!("▶ 나\r\n{}\r\n\r\n", to_crlf(prompt)));
+        text.push_str(&format!("▶ 나 · {}\r\n{}\r\n\r\n", now_text(), to_crlf(prompt)));
         chat_append(&chat.log, &text);
         chat.pending_start = Some(chat_len(&chat.log));
         chat_append(&chat.log, "◀ AI — 응답을 기다리는 중…\r\n");
@@ -629,8 +655,21 @@ fn chat_finish(header: &str, body: &str) {
         let start = chat.pending_start.take().unwrap_or(end);
         chat.log.set_selection(start, end);
         chat.log
-            .replace_selection(&format!("{header}\r\n{}\r\n\r\n", to_crlf(body.trim_end())));
+            .replace_selection(&format!(
+                "{header} · {}\r\n{}\r\n\r\n",
+                now_text(),
+                to_crlf(body.trim_end())
+            ));
     });
+}
+
+/// 지금 시스템 로컬 시간. 예: `2026-11-09 14:03:21`
+fn now_text() -> String {
+    let t = winsafe::GetLocalTime();
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond
+    )
 }
 
 /// 대화 칸 끝에 글을 덧붙인다. 바뀐 자리로 스크롤된다.
