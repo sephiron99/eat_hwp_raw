@@ -170,6 +170,28 @@ unsafe가 필요한 기능은 이 프로젝트에 두지 않고 hwp_automation_r
 1. eat_hwp_raw 프로젝트에 hwp action/method/parameter을 추가하지 못함.
 1. 문서 내용은 Hwp sdk의 GetTextFile(HWPML2X)로 읽고, 결과는 SetTextFile로 넣는다. SaveAs로 임시 파일을 만들거나 hwpx를 파싱하지 않는다.
 
+## 라이선스
+GPL-3.0-or-later. 전문은 `LICENSE`, 각 크레이트 `Cargo.toml`의 `license` 필드도 같다. GPL은 이 저장소의
+코드에만 적용되며, 한글 프로그램이나 한글 오토메이션을 이용할 권리는 포함하지 않는다.
+
+### 한글 오토메이션 이용 조건
+- **비공식 프로젝트**: 이 소프트웨어는 주식회사 한글과컴퓨터(이하 한컴)와 무관한 독립적 결과물이며, 한컴의
+  승인·보증·지원을 받지 않았다.
+- **이용 조건**: 한컴은 한글 오토메이션을 개인이 비상업적인 목적으로 이용하는 경우에 한해 자유롭게 쓸 수
+  있다고 안내하며, 상업적으로 판매되는 솔루션이나 응용 프로그램 개발 등 상업적 목적의 이용에는 한컴의
+  승인을 통한 별도 라이선스를 요구한다(hwp_automation_rs README 기준, 2026년 10월 확인). 이 프로젝트는
+  hwp_automation_rs를 통해 한글 오토메이션을 쓰므로 이 프로젝트를 쓰는 사람에게도 같은 조건이 적용된다.
+  최신 조건은 [한컴 디벨로퍼의 한글 오토메이션 안내](https://developer.hancom.com/hwpautomation)에서 직접
+  확인한다.
+- **상표**: "한글", "한컴", "HWP", "HWPX"는 한컴의 상표다. 이 프로젝트는 호환 대상을 가리키기 위해서만 이
+  이름을 쓴다.
+
+This is an unofficial project, not affiliated with or endorsed by Hancom Inc. It uses HWP Automation
+through hwp_automation_rs. Hancom states that HWP Automation is free only for personal, non-commercial
+use and that commercial use requires a separate license from Hancom; the same applies to anyone using
+this project. "Hangul", "Hancom", "HWP", and "HWPX" are trademarks of Hancom Inc., used here only to
+identify the product this project works with.
+
 ## LLM 서버
 LLM을 돌리는 곳은 세 가지다: 개발환경의 로컬 서버, 실행환경의 로컬 서버, 외부 llm service(Claude API).
 로컬 서버는 local or intranet llm server(gemma4 or etc)다. `eat_hwp_server`는 LLM 서버와 같은 기기에 둔다.
