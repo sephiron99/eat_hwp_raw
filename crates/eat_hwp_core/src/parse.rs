@@ -7,6 +7,9 @@ use anyhow::{Result, anyhow};
 use roxmltree::{Node, ParsingOptions};
 use std::ops::Range;
 
+/// LLM에 보내는 문서 텍스트 안에서 커서 위치를 나타내는 표시.
+pub const CARET_MARK: &str = "[[커서]]";
+
 /// HWPML에서 추출한 문단 텍스트.
 pub struct HwpmlDocument {
     /// 표 셀 등 중첩 문단까지 포함한 모든 문단, 문서 순서.
@@ -15,11 +18,20 @@ pub struct HwpmlDocument {
 
 struct Paragraph {
     text: String,
-    /// 이 문단을 담은 바깥 문단의 인덱스. 본문 문단은 `None`.
-    /// 한 표의 셀들, 한 각주의 문단들은 같은 바깥 문단을 가진다.
-    outer: Option<usize>,
+    /// 문단 텍스트를 이루는 조각과 그 조각이 HWPML 문자열 안에서 차지하는 바이트 범위.
+    /// 커서 표시를 글자 사이에 끼워 넣을 때 쓴다.
+    pieces: Vec<Piece>,
     /// HWPML 문자열 안에서 `P` 요소가 차지하는 바이트 범위.
     range: Range<usize>,
+}
+
+struct Piece {
+    range: Range<usize>,
+    text: String,
+    /// XML 텍스트 노드면 `true`. 이때만 조각 안쪽에 커서가 올 수 있다.
+    is_text: bool,
+    /// 텍스트 노드의 원문(엔티티를 풀기 전). 텍스트 노드가 아니면 빈 문자열.
+    raw: String,
 }
 
 /// HWPML 문자열을 파싱한다.
@@ -33,78 +45,164 @@ pub fn parse_hwpml(hwpml: &str) -> Result<HwpmlDocument> {
 
     let mut doc = HwpmlDocument { paras: Vec::new() };
     for section in xml.descendants().filter(|n| n.has_tag_name("SECTION")) {
-        collect_paragraphs(section, None, &mut doc);
+        collect_paragraphs(section, &mut doc);
     }
     Ok(doc)
 }
 
 /// 문서 전체 텍스트를 추출한다. (프롬프트 컨텍스트용)
-pub fn document_text(doc: &HwpmlDocument) -> String {
-    let texts: Vec<&str> = doc.paras.iter().map(|p| p.text.as_str()).collect();
+///
+/// `caret`(HWPML 문자열 안의 바이트 위치)이 어느 문단 안에 있으면 그 자리에 [`CARET_MARK`]를
+/// 끼워 넣는다.
+pub fn document_text(doc: &HwpmlDocument, caret: Option<usize>) -> String {
+    let marked = caret.and_then(|at| caret_target(doc, at).map(|i| (i, marked_text(&doc.paras[i], at))));
+    let texts: Vec<&str> = doc
+        .paras
+        .iter()
+        .enumerate()
+        .map(|(i, p)| match &marked {
+            Some((target, text)) if *target == i => text.as_str(),
+            _ => p.text.as_str(),
+        })
+        .collect();
     texts.join("\n")
 }
 
-/// 커서가 있는 문단과 같은 묶음의 문단 텍스트를 문서 순서대로 반환한다.
-///
-/// `caret`은 파싱한 HWPML 문자열 안의 바이트 위치(`HwpExt::hwpml_with_caret`의 `offset`)다.
-/// 반환값은 (문단 텍스트들, 그 안에서 커서 문단의 인덱스). 묶음은 본문 문단 전체이거나,
-/// 커서가 표 셀·각주 등 안에 있으면 같은 바깥 문단에 든 문단들이다. 커서 위치가 어느
-/// 문단에도 속하지 않으면 `None`.
-pub fn caret_paragraphs(doc: &HwpmlDocument, caret: usize) -> Option<(Vec<&str>, usize)> {
+/// 커서가 든 가장 안쪽 문단의 인덱스.
+fn caret_target(doc: &HwpmlDocument, caret: usize) -> Option<usize> {
     // 중첩 문단은 바깥 문단보다 뒤에 나오므로, 범위에 드는 마지막 문단이 가장 안쪽이다.
-    let target = doc.paras.iter().rposition(|p| p.range.contains(&caret))?;
-    let outer = doc.paras[target].outer;
-
-    let mut texts = Vec::new();
-    let mut center = 0;
-    for (i, para) in doc.paras.iter().enumerate() {
-        if para.outer == outer {
-            if i == target {
-                center = texts.len();
-            }
-            texts.push(para.text.as_str());
-        }
-    }
-    Some((texts, center))
+    doc.paras.iter().rposition(|p| p.range.contains(&caret))
 }
 
-/// `node` 아래의 `P`를 문서 순서로 모은다. `outer`는 `node`를 담은 문단의 인덱스.
-fn collect_paragraphs(node: Node, outer: Option<usize>, doc: &mut HwpmlDocument) {
+/// 문단 텍스트의 커서 자리에 [`CARET_MARK`]를 끼워 넣는다.
+///
+/// 커서가 글자 사이(텍스트 노드 안쪽)면 그 자리에, 요소 경계면 그 앞 조각까지 쓴 뒤에 넣는다.
+fn marked_text(para: &Paragraph, caret: usize) -> String {
+    let mut out = String::new();
+    let mut placed = false;
+    for piece in &para.pieces {
+        if !placed && caret <= piece.range.start {
+            out.push_str(CARET_MARK);
+            placed = true;
+        }
+        if !placed && piece.is_text && piece.range.contains(&caret) {
+            let before = decode_xml_text(&para_source_slice(piece, caret));
+            match piece.text.strip_prefix(before.as_str()) {
+                Some(after) => {
+                    out.push_str(&before);
+                    out.push_str(CARET_MARK);
+                    out.push_str(after);
+                }
+                // 원문과 맞춰지지 않으면 조각 뒤에 둔다.
+                None => {
+                    out.push_str(&piece.text);
+                    out.push_str(CARET_MARK);
+                }
+            }
+            placed = true;
+            continue;
+        }
+        out.push_str(&piece.text);
+    }
+    if !placed {
+        out.push_str(CARET_MARK);
+    }
+    out
+}
+
+/// 텍스트 조각의 원문 중 커서 앞부분.
+fn para_source_slice(piece: &Piece, caret: usize) -> String {
+    let end = caret - piece.range.start;
+    match piece.raw.get(..end) {
+        Some(before) => before.to_string(),
+        None => piece.raw.clone(),
+    }
+}
+
+/// XML 텍스트 원문의 엔티티(`&lt;` 등, 숫자 참조)를 풀어 쓴다.
+fn decode_xml_text(raw: &str) -> String {
+    let mut out = String::new();
+    let mut rest = raw;
+    while let Some(amp) = rest.find('&') {
+        out.push_str(&rest[..amp]);
+        let tail = &rest[amp..];
+        let Some(semi) = tail.find(';') else {
+            out.push_str(tail);
+            return out;
+        };
+        let entity = &tail[1..semi];
+        let decoded = match entity {
+            "lt" => Some('<'),
+            "gt" => Some('>'),
+            "amp" => Some('&'),
+            "quot" => Some('"'),
+            "apos" => Some('\''),
+            _ => entity
+                .strip_prefix("#x")
+                .and_then(|h| u32::from_str_radix(h, 16).ok())
+                .or_else(|| entity.strip_prefix('#').and_then(|d| d.parse().ok()))
+                .and_then(char::from_u32),
+        };
+        match decoded {
+            Some(c) => out.push(c),
+            None => out.push_str(&tail[..=semi]),
+        }
+        rest = &tail[semi + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// `node` 아래의 `P`를 문서 순서로 모은다. 중첩 문단은 바깥 문단 바로 뒤에 온다.
+fn collect_paragraphs(node: Node, doc: &mut HwpmlDocument) {
     for child in node.children().filter(Node::is_element) {
         if child.has_tag_name("P") {
-            let index = doc.paras.len();
+            let pieces = paragraph_pieces(child);
             doc.paras.push(Paragraph {
-                text: paragraph_text(child),
-                outer,
+                text: pieces.iter().map(|p| p.text.as_str()).collect(),
+                pieces,
                 range: child.range(),
             });
-            collect_paragraphs(child, Some(index), doc);
+            collect_paragraphs(child, doc);
         } else {
-            collect_paragraphs(child, outer, doc);
+            collect_paragraphs(child, doc);
         }
     }
 }
 
-/// 문단 자신의 텍스트(`P > TEXT > CHAR`). 중첩 문단의 텍스트는 포함하지 않는다.
-fn paragraph_text(para: Node) -> String {
-    let mut text = String::new();
+/// 문단 자신의 텍스트 조각(`P > TEXT > CHAR`). 중첩 문단의 텍스트는 포함하지 않는다.
+fn paragraph_pieces(para: Node) -> Vec<Piece> {
+    let mut pieces = Vec::new();
     let chars = para
         .children()
         .filter(|n| n.has_tag_name("TEXT"))
         .flat_map(|t| t.children())
         .filter(|n| n.has_tag_name("CHAR"));
-    for piece in chars.flat_map(|c| c.children()) {
-        if piece.is_text() {
-            text.push_str(piece.text().unwrap_or_default());
+    for node in chars.flat_map(|c| c.children()) {
+        let range = node.range();
+        if node.is_text() {
+            let raw = node.document().input_text()[range.clone()].to_string();
+            pieces.push(Piece {
+                range,
+                text: node.text().unwrap_or_default().to_string(),
+                is_text: true,
+                raw,
+            });
         } else {
-            match piece.tag_name().name() {
-                "TAB" => text.push('\t'),
-                "LINEBREAK" => text.push('\n'),
-                "NBSPACE" | "FWSPACE" => text.push(' '),
-                "HYPHEN" => text.push('-'),
-                _ => {}
-            }
+            let text = match node.tag_name().name() {
+                "TAB" => "\t",
+                "LINEBREAK" => "\n",
+                "NBSPACE" | "FWSPACE" => " ",
+                "HYPHEN" => "-",
+                _ => "",
+            };
+            pieces.push(Piece {
+                range,
+                text: text.to_string(),
+                is_text: false,
+                raw: String::new(),
+            });
         }
     }
-    text
+    pieces
 }

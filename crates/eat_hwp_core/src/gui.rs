@@ -1,23 +1,27 @@
 //! winsafe 기반 GUI 셸 (CLAUDE.md "eat_hwp_raw GUI"의 현재 구현).
 //!
 //! 목표 구조에서 GUI는 `eat_hwp_addon`으로 옮기고 구성도 바뀐다(서버 지정, 프롬프트 수정,
-//! 전송·통신 상황). LLM 설정은 서버에 두므로 Claude API 키 입력 칸은 남지 않고, 현재문단/전체문서
-//! 선택은 삭제하며, 답변 칸과 처리완료 알람은 구현을 보류한다.
+//! 전송·통신 상황). LLM 설정은 서버에 두므로 Claude API 키 입력 칸은 남지 않고, 답변 칸과
+//! 처리완료 알람은 구현을 보류한다.
 //!
 //! 구성:
 //! - Claude API 키 입력 칸(비우면 환경 변수 설정대로 실행)
-//! - 현재문단/전체문서 컨텍스트 지정 체크박스
+//! - 모델 칸: 백엔드가 제공하는 모델 목록에서 고르거나 직접 입력. 창을 열 때와 "목록 새로고침"을
+//!   누를 때 목록을 받아 온다
 //! - 프롬프트/답변 textarea (multiline Edit; 답변은 read-only)
 //! - 실행(commit) 버튼 → 워크플로 실행 → 답변 표시 + 처리완료 알람(MessageBox)
+//!
+//! LLM에는 항상 문서 전체를 커서 위치 표시와 함께 보낸다.
 //!
 //! 문서 내용은 `hwp` 모듈이 실행 중인 한글에서 `GetTextFile`(HWPML2X)로 읽어 온다. 한글 없이
 //! 테스트할 때는 환경변수 `EAT_HWP_DOC`에 HWPML 파일(UTF-8) 경로를 지정하면 그 파일을 사용한다.
 
 use crate::config::Config;
 use crate::hwp::{self, DocSnapshot};
-use crate::llm::{LlmBackend, RigBackend};
-use crate::workflow::{self, Scope};
+use crate::llm::{self, LlmBackend, RigBackend};
+use crate::workflow;
 use anyhow::{Result, anyhow};
+use std::cell::RefCell;
 use std::sync::Arc;
 use winsafe::{co, gui, prelude::*};
 
@@ -27,6 +31,12 @@ use winsafe::{co, gui, prelude::*};
 const ID_TXT_ANSWER: u16 = 1001;
 const ID_BTN_RUN: u16 = 1002;
 
+thread_local! {
+    /// 모델 칸의 라벨과 콤보박스. winsafe 컨트롤은 스레드를 못 넘기므로, 목록을 받아 온 워커가
+    /// `run_ui_thread`로 UI 스레드에 돌아온 뒤 여기서 꺼내 쓴다. UI 스레드에서만 채워진다.
+    static MODEL_UI: RefCell<Option<(gui::Label, gui::ComboBox)>> = const { RefCell::new(None) };
+}
+
 /// 메인 윈도우와 컨트롤, 공유 상태(설정)를 보유한다.
 pub struct MainWindow {
     wnd: gui::WindowMain,
@@ -34,7 +44,6 @@ pub struct MainWindow {
     #[allow(dead_code)]
     lbl_prompt: gui::Label,
     txt_prompt: gui::Edit,
-    chk_whole: gui::CheckBox,
     btn_run: gui::Button,
     #[allow(dead_code)]
     lbl_answer: gui::Label,
@@ -42,6 +51,10 @@ pub struct MainWindow {
     #[allow(dead_code)]
     lbl_api_key: gui::Label,
     txt_api_key: gui::Edit,
+    #[allow(dead_code)]
+    lbl_model: gui::Label,
+    cmb_model: gui::ComboBox,
+    btn_models: gui::Button,
     // 워커 스레드로 넘기기 위해 Arc(Send+Sync).
     cfg: Arc<Config>,
 }
@@ -51,7 +64,7 @@ impl MainWindow {
     pub fn new(cfg: Config) -> Self {
         let wnd = gui::WindowMain::new(gui::WindowMainOpts {
             title: "eat_hwp_raw — HWP AI Agent",
-            size: gui::dpi(520, 520),
+            size: gui::dpi(520, 544),
             ..Default::default()
         });
 
@@ -59,14 +72,14 @@ impl MainWindow {
             &wnd,
             gui::LabelOpts {
                 text: "프롬프트",
-                position: gui::dpi(10, 58),
+                position: gui::dpi(10, 108),
                 ..Default::default()
             },
         );
         let txt_prompt = gui::Edit::new(
             &wnd,
             gui::EditOpts {
-                position: gui::dpi(10, 76),
+                position: gui::dpi(10, 126),
                 width: gui::dpi_x(500),
                 height: gui::dpi_y(120),
                 control_style: co::ES::MULTILINE
@@ -76,19 +89,11 @@ impl MainWindow {
                 ..Default::default()
             },
         );
-        let chk_whole = gui::CheckBox::new(
-            &wnd,
-            gui::CheckBoxOpts {
-                text: "전체 문서 컨텍스트 (해제 시 현재 문단)",
-                position: gui::dpi(10, 206),
-                ..Default::default()
-            },
-        );
         let btn_run = gui::Button::new(
             &wnd,
             gui::ButtonOpts {
                 text: "실행 (Commit)",
-                position: gui::dpi(10, 232),
+                position: gui::dpi(10, 256),
                 width: gui::dpi_x(140),
                 ctrl_id: ID_BTN_RUN,
                 ..Default::default()
@@ -98,14 +103,14 @@ impl MainWindow {
             &wnd,
             gui::LabelOpts {
                 text: "답변",
-                position: gui::dpi(10, 272),
+                position: gui::dpi(10, 296),
                 ..Default::default()
             },
         );
         let txt_answer = gui::Edit::new(
             &wnd,
             gui::EditOpts {
-                position: gui::dpi(10, 290),
+                position: gui::dpi(10, 314),
                 width: gui::dpi_x(500),
                 height: gui::dpi_y(200),
                 control_style: co::ES::MULTILINE
@@ -134,17 +139,49 @@ impl MainWindow {
                 ..Default::default()
             },
         );
+        let lbl_model = gui::Label::new(
+            &wnd,
+            gui::LabelOpts {
+                text: "모델 (목록에서 고르거나 직접 입력)",
+                position: gui::dpi(10, 58),
+                // 나중에 더 긴 상태 문구로 바뀌므로 글자 길이에 맞추지 않고 폭을 고정한다.
+                size: gui::dpi(500, 16),
+                ..Default::default()
+            },
+        );
+        let cmb_model = gui::ComboBox::new(
+            &wnd,
+            gui::ComboBoxOpts {
+                position: gui::dpi(10, 76),
+                width: gui::dpi_x(380),
+                // 목록에 없는 모델 이름도 직접 입력할 수 있게 편집형으로 둔다.
+                control_style: co::CBS::DROPDOWN,
+                ..Default::default()
+            },
+        );
+        let btn_models = gui::Button::new(
+            &wnd,
+            gui::ButtonOpts {
+                text: "목록 새로고침",
+                position: gui::dpi(400, 75),
+                width: gui::dpi_x(110),
+                ..Default::default()
+            },
+        );
+        MODEL_UI.with_borrow_mut(|ui| *ui = Some((lbl_model.clone(), cmb_model.clone())));
 
         let new_self = Self {
             wnd,
             lbl_prompt,
             txt_prompt,
-            chk_whole,
             btn_run,
             lbl_answer,
             txt_answer,
             lbl_api_key,
             txt_api_key,
+            lbl_model,
+            cmb_model,
+            btn_models,
             cfg: Arc::new(cfg),
         };
         new_self.events();
@@ -158,28 +195,44 @@ impl MainWindow {
     /// 완료 시 `wnd.run_ui_thread`로 UI 스레드에 복귀해 컨트롤을 갱신한다.
     fn events(&self) {
         let wnd = self.wnd.clone();
-        let chk = self.chk_whole.clone();
         let txt_prompt = self.txt_prompt.clone();
         let txt_answer = self.txt_answer.clone();
         let btn_run = self.btn_run.clone();
         let txt_api_key = self.txt_api_key.clone();
+        let cmb_model = self.cmb_model.clone();
         let cfg = Arc::clone(&self.cfg);
 
+        // 창이 만들어지면 모델 칸에 설정의 모델을 넣고 목록을 받아 온다.
+        {
+            let wnd2 = wnd.clone();
+            let cmb_model = self.cmb_model.clone();
+            let cfg = Arc::clone(&self.cfg);
+            self.wnd.on().wm_create(move |_| {
+                let _ = cmb_model.hwnd().SetWindowText(&cfg.llm_model);
+                refresh_models(&wnd2, Arc::clone(&cfg));
+                Ok(0)
+            });
+        }
+
+        // 목록 새로고침: 키 칸의 값까지 반영한 설정으로 다시 받아 온다(키를 넣으면 Claude 목록).
+        {
+            let wnd2 = wnd.clone();
+            let txt_api_key = self.txt_api_key.clone();
+            let cfg = Arc::clone(&self.cfg);
+            self.btn_models.on().bn_clicked(move || {
+                let key = txt_api_key.text().unwrap_or_default();
+                refresh_models(&wnd2, effective_cfg(&cfg, &key, ""));
+                Ok(())
+            });
+        }
+
         self.btn_run.on().bn_clicked(move || {
-            let scope = if chk.is_checked() {
-                Scope::WholeDocument
-            } else {
-                Scope::CurrentParagraph
-            };
             let user_prompt = txt_prompt.text().unwrap_or_default();
             // 키를 입력했으면 Claude API로, 비웠으면 환경 변수 설정대로 실행한다.
+            // 모델 칸이 비어 있지 않으면 그 모델을 쓴다.
             let api_key = txt_api_key.text().unwrap_or_default();
-            let api_key = api_key.trim();
-            let cfg = if api_key.is_empty() {
-                Arc::clone(&cfg)
-            } else {
-                Arc::new(cfg.with_claude_key(api_key))
-            };
+            let model = cmb_model.hwnd().GetWindowText().unwrap_or_default();
+            let cfg = effective_cfg(&cfg, &api_key, &model);
 
             // UI 스레드: 즉시 피드백 + 재진입 방지(버튼 비활성화).
             let _ = txt_answer.set_text("처리 중...");
@@ -191,7 +244,7 @@ impl MainWindow {
             std::thread::spawn(move || {
                 // 키가 실행마다 달라질 수 있어 백엔드는 실행할 때 만든다.
                 let result = RigBackend::new(&cfg)
-                    .and_then(|backend| run_workflow(&cfg, &backend, &user_prompt, scope));
+                    .and_then(|backend| run_workflow(&cfg, &backend, &user_prompt));
                 let wnd_ui = wnd.clone();
                 wnd.run_ui_thread(move || {
                     finish_on_ui(&wnd_ui, result);
@@ -206,6 +259,78 @@ impl MainWindow {
     pub fn run(&self) -> winsafe::AnyResult<i32> {
         self.wnd.run_main(None)
     }
+}
+
+/// 환경 변수 설정에 GUI의 키 칸과 모델 칸 값을 덮어쓴 설정. 빈 칸은 무시한다.
+fn effective_cfg(base: &Arc<Config>, api_key: &str, model: &str) -> Arc<Config> {
+    let mut cfg = Config::clone(base);
+    if !api_key.trim().is_empty() {
+        cfg = cfg.with_claude_key(api_key.trim());
+    }
+    if !model.trim().is_empty() {
+        cfg = cfg.with_model(model.trim());
+    }
+    Arc::new(cfg)
+}
+
+/// 워커 스레드에서 모델 목록을 받아 와 UI 스레드에서 모델 칸을 채운다.
+fn refresh_models(wnd: &gui::WindowMain, cfg: Arc<Config>) {
+    set_model_status("모델 (목록을 불러오는 중…)");
+    let wnd = wnd.clone();
+    std::thread::spawn(move || {
+        let result = llm::list_models(&cfg);
+        let default_model = cfg.llm_model.clone();
+        wnd.run_ui_thread(move || {
+            fill_models(result, &default_model);
+            Ok(())
+        });
+    });
+}
+
+fn set_model_status(text: &str) {
+    MODEL_UI.with_borrow(|ui| {
+        if let Some((lbl, _)) = ui {
+            let _ = lbl.hwnd().SetWindowText(text);
+        }
+    });
+}
+
+/// 받아 온 모델 목록으로 모델 칸을 채운다(UI 스레드).
+///
+/// 칸에 있던 모델이 새 목록에 있으면 그대로 두고, 없으면(백엔드가 바뀐 경우 등) 설정의 기본
+/// 모델로 바꾼다. 실패하면 목록은 그대로 두고 라벨에 오류를 보인다.
+fn fill_models(result: Result<Vec<String>>, default_model: &str) {
+    MODEL_UI.with_borrow(|ui| {
+        let Some((lbl, cmb)) = ui else {
+            return;
+        };
+        match result {
+            Ok(models) => {
+                let current = cmb.hwnd().GetWindowText().unwrap_or_default();
+                let current = current.trim();
+                let keep = if models.iter().any(|m| m == current) {
+                    current.to_string()
+                } else {
+                    default_model.to_string()
+                };
+                cmb.items().delete_all();
+                let _ = cmb.items().add(&models);
+                match models.iter().position(|m| *m == keep) {
+                    Some(i) => cmb.items().select(Some(i as u32)),
+                    None => {
+                        let _ = cmb.hwnd().SetWindowText(&keep);
+                    }
+                }
+                let _ = lbl.hwnd().SetWindowText(&format!(
+                    "모델 (목록 {}개 — 고르거나 직접 입력)",
+                    models.len()
+                ));
+            }
+            Err(e) => {
+                let _ = lbl.hwnd().SetWindowText(&format!("모델 (목록 실패: {e:#})"));
+            }
+        }
+    });
 }
 
 /// 워커 결과를 UI 스레드에서 반영한다(버튼 재활성화, 답변 표시, 완료 알람).
@@ -240,10 +365,9 @@ fn run_workflow(
     cfg: &Config,
     backend: &dyn LlmBackend,
     user_prompt: &str,
-    scope: Scope,
 ) -> Result<String> {
     let doc = acquire_document()?;
-    workflow::run_prompt(cfg, backend, &doc.hwpml, user_prompt, scope, doc.caret)
+    workflow::run_prompt(cfg, backend, &doc.hwpml, user_prompt, doc.caret)
 }
 
 /// 문서의 HWPML과(가능하면) 커서 위치를 확보한다.

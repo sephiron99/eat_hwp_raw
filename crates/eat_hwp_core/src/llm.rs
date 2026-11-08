@@ -8,9 +8,9 @@ use crate::config::{Config, Provider};
 use anyhow::{Result, anyhow, bail};
 use rig::completion::{CompletionRequest, Reasoning};
 use rig::driver::Model;
-use rig::providers::anthropic::AnthropicConfig;
+use rig::providers::anthropic::{Anthropic, AnthropicConfig};
 use rig::providers::anthropic::wire::Messages;
-use rig::providers::openai::OpenAIConfig;
+use rig::providers::openai::{OpenAI, OpenAIConfig};
 use rig::providers::openai::wire::Chat;
 
 /// Claude API 응답의 최대 출력 토큰. Messages API는 이 값을 반드시 요구한다.
@@ -51,21 +51,10 @@ impl RigBackend {
             .map_err(|e| anyhow!("tokio 런타임 생성 실패: {e}"))?;
         let model = match cfg.llm_provider {
             Provider::OpenAiCompatible => {
-                let mut provider = OpenAIConfig::new(cfg.llm_api_key.as_str());
-                if !cfg.llm_base_url.is_empty() {
-                    provider = provider.with_base_url(cfg.llm_base_url.as_str());
-                }
-                RigModel::OpenAiCompatible(provider.client().chat(cfg.llm_model.as_str()))
+                RigModel::OpenAiCompatible(openai_client(cfg).chat(cfg.llm_model.as_str()))
             }
             Provider::Anthropic => {
-                if cfg.llm_api_key.is_empty() {
-                    bail!("Claude API 키가 없음: EAT_HWP_LLM_API_KEY 또는 ANTHROPIC_API_KEY를 설정하세요");
-                }
-                let mut provider = AnthropicConfig::new(cfg.llm_api_key.as_str());
-                if !cfg.llm_base_url.is_empty() {
-                    provider = provider.with_base_url(cfg.llm_base_url.as_str());
-                }
-                RigModel::Anthropic(provider.client().completion(cfg.llm_model.as_str()))
+                RigModel::Anthropic(anthropic_client(cfg)?.completion(cfg.llm_model.as_str()))
             }
         };
         Ok(Self {
@@ -94,6 +83,44 @@ impl LlmBackend for RigBackend {
             Ok(response.text())
         })
     }
+}
+
+/// 설정의 백엔드가 제공하는 모델 ID 목록을 이름순으로 돌려준다.
+///
+/// OpenAI 호환 서버는 `GET {base_url}/models`(Ollama는 받아 둔 모델), Claude API는 Models API를 쓴다.
+pub fn list_models(cfg: &Config) -> Result<Vec<String>> {
+    let runtime =
+        tokio::runtime::Runtime::new().map_err(|e| anyhow!("tokio 런타임 생성 실패: {e}"))?;
+    let list = match cfg.llm_provider {
+        Provider::OpenAiCompatible => runtime.block_on(openai_client(cfg).list_models()),
+        Provider::Anthropic => runtime.block_on(anthropic_client(cfg)?.list_models()),
+    }
+    .map_err(|e| anyhow!("모델 목록 조회 실패: {e}"))?;
+    let mut ids: Vec<String> = list.data.into_iter().map(|m| m.id).collect();
+    ids.sort();
+    ids.dedup();
+    Ok(ids)
+}
+
+/// OpenAI 호환 클라이언트. 키가 비어 있어도 된다(로컬 서버).
+fn openai_client(cfg: &Config) -> OpenAI {
+    let mut provider = OpenAIConfig::new(cfg.llm_api_key.as_str());
+    if !cfg.llm_base_url.is_empty() {
+        provider = provider.with_base_url(cfg.llm_base_url.as_str());
+    }
+    provider.client()
+}
+
+/// Claude API 클라이언트. 키가 없으면 오류.
+fn anthropic_client(cfg: &Config) -> Result<Anthropic> {
+    if cfg.llm_api_key.is_empty() {
+        bail!("Claude API 키가 없음: EAT_HWP_LLM_API_KEY 또는 ANTHROPIC_API_KEY를 설정하세요");
+    }
+    let mut provider = AnthropicConfig::new(cfg.llm_api_key.as_str());
+    if !cfg.llm_base_url.is_empty() {
+        provider = provider.with_base_url(cfg.llm_base_url.as_str());
+    }
+    Ok(provider.client())
 }
 
 /// rig 연동 없이 파이프라인을 검증하기 위한 임시 백엔드(테스트/폴백용).

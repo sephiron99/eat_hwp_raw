@@ -69,6 +69,14 @@ impl Config {
         })
     }
 
+    /// 모델만 바꾼 설정을 만든다. (GUI의 모델 칸)
+    pub fn with_model(&self, model: &str) -> Self {
+        Self {
+            llm_model: model.to_string(),
+            ..self.clone()
+        }
+    }
+
     /// GUI에 입력한 Claude API 키로 Claude API를 쓰는 설정을 만든다.
     ///
     /// 환경 변수 설정이 이미 Claude API이면 모델과 주소는 그대로 두고 키만 바꾼다. 로컬 서버
