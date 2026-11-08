@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!-- rundll32로 띄운 GUI가 공용 컨트롤 v6(비주얼 스타일, 콤보박스 드롭다운 높이 자동 계산)을 쓰게 한다.
+     build.rs가 리소스 ID 123으로 DLL에 넣는다. rundll32는 대상 DLL의 ID 123 매니페스트를
+     진입점 호출 전에 활성화한다. 한글이 이 DLL을 애드온으로 로드할 때는 쓰이지 않는다. -->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0"
+                        processorArchitecture="*" publicKeyToken="6595b64144ccf1df" language="*"/>
+    </dependentAssembly>
+  </dependency>
+</assembly>

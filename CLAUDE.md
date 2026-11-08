@@ -121,6 +121,9 @@ Windows 전용이다. 애드온은 WinSafe/COM을 쓰고 한글 COM이 32비트�
 - `cargo build`: WSL에서는 [msvc-wsl-rust](https://github.com/strickczq/msvc-wsl-rust) 링커가 필요
   (`.cargo/config.toml`의 `linker` 경로를 환경에 맞게 수정).
 - `cargo check`: 링크를 하지 않으므로 링커 없이 WSL에서 타입 검증 가능.
+- 매니페스트: `crates/eat_hwp_addon/build.rs`가 `eat_hwp_addon.manifest`(공용 컨트롤 v6)를 링커
+  `/MANIFEST:EMBED,ID=123`으로 DLL에 넣는다. rundll32는 대상 DLL의 ID 123 매니페스트를 활성화한 뒤
+  진입점을 부르므로 GUI가 v6 컨트롤로 뜬다. 이것이 없으면 콤보박스 드롭다운이 펼쳐지지 않는다.
 
 ```bash
 cargo build
