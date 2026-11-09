@@ -20,6 +20,7 @@ mod hwp;
 mod llm;
 mod markdown;
 mod parse;
+mod settings;
 mod workflow;
 
 use anyhow::{Result, anyhow};

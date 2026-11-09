@@ -7,6 +7,8 @@
 //! 구성:
 //! - Claude API 키 입력 칸(비우면 환경 변수 설정대로 실행)
 //! - 모델 칸: 백엔드가 제공하는 모델 목록에서 고르거나 직접 입력
+//! - "시스템 프롬프트…" 버튼: 사용자 지정 시스템 프롬프트(`settings`의 `system_prompt.txt`)를 고치는
+//!   창을 연다. 규약 지시 뒤에 붙는다
 //! - 문서 형식 칸: LLM에 보낼 문서 텍스트의 형식(평문 / HWPML 원문 / HWPX→Markdown /
 //!   SaveAs HWPML 파일)을 고른다
 //! - LLM 상태 줄: 지금 설정(키 칸 포함)이 가리키는 서버가 작동하는지 보인다. 창을 열 때, "상태 확인"을
@@ -33,6 +35,7 @@ use crate::chat_store;
 use crate::config::{Config, Provider};
 use crate::hwp::{self, DocContent, DocSnapshot};
 use crate::markdown;
+use crate::settings;
 use crate::llm::{self, LlmBackend, RigBackend, ServerState, ServerStatus};
 use crate::workflow::{self, DocFormat};
 use anyhow::{Result, anyhow};
@@ -93,6 +96,7 @@ pub struct MainWindow {
     #[allow(dead_code)]
     lbl_format: gui::Label,
     cmb_format: gui::ComboBox,
+    btn_system: gui::Button,
     btn_models: gui::Button,
     #[allow(dead_code)]
     lbl_status: gui::Label,
@@ -273,12 +277,22 @@ impl MainWindow {
             &wnd,
             gui::ComboBoxOpts {
                 position: gui::dpi(120, 126),
-                width: gui::dpi_x(270),
+                width: gui::dpi_x(260),
                 items: &format_labels,
                 selected_item: DocFormat::ALL
                     .iter()
                     .position(|f| *f == DocFormat::DEFAULT)
                     .map(|i| i as u32),
+                ..Default::default()
+            },
+        );
+        let btn_system = gui::Button::new(
+            &wnd,
+            gui::ButtonOpts {
+                text: "시스템 프롬프트…",
+                position: gui::dpi(390, 125),
+                width: gui::dpi_x(120),
+                resize_behavior: (gui::Horz::Repos, gui::Vert::None),
                 ..Default::default()
             },
         );
@@ -297,6 +311,7 @@ impl MainWindow {
             cmb_model,
             lbl_format,
             cmb_format,
+            btn_system,
             btn_models,
             lbl_status,
             cfg: Arc::new(cfg),
@@ -370,6 +385,15 @@ impl MainWindow {
             Ok(())
         });
 
+        // 사용자 지정 시스템 프롬프트 편집 창.
+        {
+            let wnd2 = wnd.clone();
+            self.btn_system.on().bn_clicked(move || {
+                edit_custom_system_prompt(&wnd2);
+                Ok(())
+            });
+        }
+
         // Ctrl+Enter: 보내기 버튼이 켜져 있을 때(응답 대기 중이 아닐 때)만 누른다.
         {
             let btn_run = self.btn_run.clone();
@@ -438,7 +462,11 @@ impl MainWindow {
                 // 키가 실행마다 달라질 수 있어 백엔드는 실행할 때 만든다.
                 let result = doc.and_then(|doc| {
                     RigBackend::new(&cfg)
-                        .and_then(|backend| run_workflow(&cfg, &backend, &doc, format, &user_prompt))
+                        .and_then(|backend| {
+                            // 편집 창에서 저장한 내용이 바로 반영되도록 요청마다 읽는다.
+                            let custom_system = settings::load_custom_system_prompt();
+                            run_workflow(&cfg, &backend, &doc, format, &user_prompt, &custom_system)
+                        })
                 });
                 match &result {
                     Ok(answer) => tracing::info!(
@@ -772,8 +800,103 @@ fn run_workflow(
     doc: &DocSnapshot,
     format: DocFormat,
     user_prompt: &str,
+    custom_system: &str,
 ) -> Result<String> {
-    workflow::run_prompt(cfg, backend, &doc.content, format, user_prompt)
+    workflow::run_prompt(cfg, backend, &doc.content, format, user_prompt, custom_system)
+}
+
+/// 사용자 지정 시스템 프롬프트를 고치는 모달 창. "저장"을 누르면 파일에 쓰고 닫는다.
+fn edit_custom_system_prompt(parent: &gui::WindowMain) {
+    let dlg = gui::WindowModal::new(gui::WindowModalOpts {
+        title: "사용자 지정 시스템 프롬프트",
+        size: gui::dpi(480, 360),
+        ..Default::default()
+    });
+    let _lbl = gui::Label::new(
+        &dlg,
+        gui::LabelOpts {
+            text: "규약 지시(커서 표시, 넣을 본문만 쓰기 등) 뒤에 붙는 지침입니다. 비우면 붙이지 않습니다.",
+            position: gui::dpi(10, 10),
+            ..Default::default()
+        },
+    );
+    let txt = gui::Edit::new(
+        &dlg,
+        gui::EditOpts {
+            position: gui::dpi(10, 32),
+            width: gui::dpi_x(460),
+            height: gui::dpi_y(280),
+            control_style: co::ES::MULTILINE
+                | co::ES::WANTRETURN
+                | co::ES::AUTOVSCROLL
+                | co::ES::NOHIDESEL,
+            window_style: co::WS::CHILD
+                | co::WS::VISIBLE
+                | co::WS::TABSTOP
+                | co::WS::GROUP
+                | co::WS::VSCROLL,
+            ..Default::default()
+        },
+    );
+    let btn_save = gui::Button::new(
+        &dlg,
+        gui::ButtonOpts {
+            text: "저장",
+            position: gui::dpi(290, 322),
+            width: gui::dpi_x(85),
+            ..Default::default()
+        },
+    );
+    let btn_cancel = gui::Button::new(
+        &dlg,
+        gui::ButtonOpts {
+            text: "취소",
+            position: gui::dpi(385, 322),
+            width: gui::dpi_x(85),
+            ..Default::default()
+        },
+    );
+
+    {
+        let txt = txt.clone();
+        dlg.on().wm_create(move |_| {
+            txt.limit_text(None);
+            let _ = txt.set_text(&to_crlf(&settings::load_custom_system_prompt()));
+            Ok(0)
+        });
+    }
+    {
+        let dlg2 = dlg.clone();
+        let txt = txt.clone();
+        btn_save.on().bn_clicked(move || {
+            let text = txt.text().unwrap_or_default();
+            match settings::save_custom_system_prompt(&text) {
+                Ok(()) => {
+                    tracing::info!(chars = text.trim().chars().count(), "사용자 지정 시스템 프롬프트 저장");
+                    dlg2.close();
+                }
+                Err(e) => {
+                    tracing::warn!(error = %format!("{e:#}"), "사용자 지정 시스템 프롬프트 저장 실패");
+                    let _ = dlg2.hwnd().MessageBox(
+                        &format!("{e:#}"),
+                        "저장 실패",
+                        co::MB::OK | co::MB::ICONERROR,
+                    );
+                }
+            }
+            Ok(())
+        });
+    }
+    {
+        let dlg2 = dlg.clone();
+        btn_cancel.on().bn_clicked(move || {
+            dlg2.close();
+            Ok(())
+        });
+    }
+    if let Err(e) = dlg.show_modal(parent) {
+        tracing::warn!(error = %e, "시스템 프롬프트 창을 열지 못함");
+    }
 }
 
 /// 고른 형식에 맞게 문서 내용과(가능하면) 커서 위치를 확보한다.

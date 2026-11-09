@@ -11,8 +11,7 @@ use std::path::{Path, PathBuf};
 
 /// 대화 기록 디렉터리. `USERPROFILE`이 없으면 `None`.
 pub fn chat_dir() -> Option<PathBuf> {
-    let home = std::env::var_os("USERPROFILE")?;
-    Some(Path::new(&home).join(".eat_hwp_raw").join("chats"))
+    Some(crate::settings::settings_dir()?.join("chats"))
 }
 
 /// 문서 경로(저장 안 된 문서는 빈 문자열)와 API 종류에 해당하는 기록 파일.

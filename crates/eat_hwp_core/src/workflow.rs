@@ -20,6 +20,7 @@ pub fn run_prompt(
     content: &DocContent,
     format: DocFormat,
     user_prompt: &str,
+    custom_system: &str,
 ) -> Result<String> {
     // 커서 정보가 없으면(예: EAT_HWP_DOC 테스트 경로) 표시 없이 문서 전체만 보낸다.
     let context = match (content, format) {
@@ -34,13 +35,14 @@ pub fn run_prompt(
     };
     let has_caret = context.contains(parse::CARET_MARK);
 
-    let system = build_system(format, has_caret);
+    let system = build_system(format, has_caret, custom_system);
     let user = build_user(&context, user_prompt);
     tracing::debug!(
         ?format,
         has_caret,
         context_chars = context.chars().count(),
         system_chars = system.chars().count(),
+        custom_system_chars = custom_system.chars().count(),
         user_chars = user.chars().count(),
         "프롬프트 구성"
     );
@@ -112,16 +114,17 @@ impl DocFormat {
     }
 }
 
-/// 시스템 메시지: 코드가 정하는 규약 지시(역할, 답변 규칙, 문서 형식 설명, 커서 표시 규칙).
+/// 시스템 메시지: ① 코드가 정하는 규약 지시(역할, 답변 규칙, 문서 형식 설명, 커서 표시 규칙)와
+/// ② 사용자가 GUI에서 고치는 사용자 지정 지침(`custom_system`, 비어 있으면 붙이지 않음).
 ///
 /// features(CLAUDE.md): 양식(제목/소제목/문단 구조)을 최대한 준수하고, 인접 제목/소제목
 /// 레벨에 상응하도록 작성한다. 답변은 문서에 그대로 넣을 본문이어야 하므로 설명·인사말·마크다운을
 /// 붙이지 말라고 지시한다. `has_caret`이면 문서 안의 [`parse::CARET_MARK`]가 커서 위치라고 알린다.
 ///
 /// 매 요청 같은 문장을 앞에 두고 형식·커서에 따라 바뀌는 문장을 뒤에 둔다. 앞부분이 같으면 로컬
-/// 서버가 이전 계산을 재사용할 여지가 있다. 나중에 사용자가 고칠 수 있는 시스템 프롬프트를 더하더라도
-/// 이 규약 부분은 코드가 갖는다(바꾸면 결과를 문서에 넣는 흐름이 깨진다).
-fn build_system(format: DocFormat, has_caret: bool) -> String {
+/// 서버가 이전 계산을 재사용할 여지가 있다. 규약 부분은 코드가 갖고 사용자가 고칠 수 없다(바꾸면
+/// 결과를 문서에 넣는 흐름이 깨진다).
+fn build_system(format: DocFormat, has_caret: bool, custom_system: &str) -> String {
     let mut system = String::from(
         "당신은 HWP 문서 작성 도우미입니다. 사용자가 보낸 문서의 양식(제목/소제목/문단 구조)을 최대한 \
          준수하여, 사용자 요청에 맞는 내용을 한국어로 작성하세요.\n\
@@ -129,6 +132,14 @@ fn build_system(format: DocFormat, has_caret: bool) -> String {
          - 답변은 문서에 바로 들어갈 본문만 씁니다. 인사말, 설명, 앞뒤 안내 문장, 마크다운 기호\
          (**, #, ---)를 붙이지 않습니다.\n",
     );
+    // ② 사용자 지정 지침: GUI에서 사용자가 고친다. 자주 바뀌지 않으므로 규약 바로 뒤에 둔다.
+    let custom_system = custom_system.trim();
+    if !custom_system.is_empty() {
+        system.push_str(&format!(
+            "\n[사용자 지정 지침] 이 메시지의 다른 규칙과 어긋나지 않는 범위에서 따릅니다.\n\
+             {custom_system}\n\n"
+        ));
+    }
     system.push_str(&format!("- {}\n", format.describe()));
     if has_caret {
         system.push_str(&format!(
