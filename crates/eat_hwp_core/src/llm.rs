@@ -80,7 +80,10 @@ impl LlmBackend for RigBackend {
                     model.call(request.max_tokens(ANTHROPIC_MAX_TOKENS)).await
                 }
             };
-            let response = response.map_err(|e| anyhow!("rig 호출 실패: {e}"))?;
+            let response = response.map_err(|e| {
+                tracing::debug!(error = ?e, "rig 오류 상세");
+                anyhow!("rig 호출 실패: {e}")
+            })?;
             Ok(response.text())
         })
     }
@@ -107,6 +110,19 @@ pub enum ServerState {
     AuthFailed(String),
     /// 그 밖의 실패.
     Failed(String),
+}
+
+impl ServerState {
+    /// 로그용 한 줄 요약.
+    pub fn summary(&self) -> String {
+        match self {
+            ServerState::Working(models) => format!("작동 중(모델 {}개)", models.len()),
+            ServerState::NoKey => "키 없음".to_string(),
+            ServerState::Unreachable(e) => format!("연결 안 됨: {e}"),
+            ServerState::AuthFailed(e) => format!("인증 실패: {e}"),
+            ServerState::Failed(e) => format!("오류: {e}"),
+        }
+    }
 }
 
 /// 설정의 백엔드에 모델 목록을 요청해 서버 상태를 점검한다.

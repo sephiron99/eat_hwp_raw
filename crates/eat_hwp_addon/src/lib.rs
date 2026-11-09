@@ -134,11 +134,22 @@ fn run_gui_entry() {
 
 // ── 로그 ──
 
-/// `%LOCALAPPDATA%\HwpAddon\<file_name>`에 파일 로그 구독자를 설치한다(프로세스당 한 번).
-/// 로그는 부가 기능이므로 설치 실패는 무시한다.
+/// 대화 기록과 같은 디렉터리(`%USERPROFILE%\.eat_hwp_raw\chats\<file_name>`)에 파일 로그 구독자를
+/// 설치한다(프로세스당 한 번, 시작할 때 파일을 비움). `USERPROFILE`이 없으면
+/// `%LOCALAPPDATA%\HwpAddon\<file_name>`에 둔다. 로그는 부가 기능이므로 설치 실패는 무시한다.
+///
+/// 수준은 환경 변수 `EAT_HWP_LOG`(error, warn, info, debug, trace)로 정하고 기본은 debug다.
+/// trace면 LLM에 보내는 프롬프트 전문(문서 내용 포함)까지 남는다.
 fn init_log(file_name: &str) {
-    if let Some(path) = logging::default_log_path() {
-        let _ = logging::init_file(path.with_file_name(file_name), LevelFilter::DEBUG);
+    let path = eat_hwp_core::log_dir()
+        .map(|dir| dir.join(file_name))
+        .or_else(|| logging::default_log_path().map(|p| p.with_file_name(file_name)));
+    let level = std::env::var("EAT_HWP_LOG")
+        .ok()
+        .and_then(|v| v.trim().parse::<LevelFilter>().ok())
+        .unwrap_or(LevelFilter::DEBUG);
+    if let Some(path) = path {
+        let _ = logging::init_file(path, level);
     }
 }
 

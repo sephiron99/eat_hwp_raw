@@ -18,10 +18,18 @@ mod config;
 mod gui;
 mod hwp;
 mod llm;
+mod markdown;
 mod parse;
 mod workflow;
 
 use anyhow::{Result, anyhow};
+use std::path::PathBuf;
+
+/// 로그 파일을 둘 디렉터리. 대화 기록과 같은 `%USERPROFILE%\.eat_hwp_raw\chats`다.
+/// `USERPROFILE`이 없으면 `None`.
+pub fn log_dir() -> Option<PathBuf> {
+    chat_store::chat_dir()
+}
 
 /// GUI를 띄우고 워크플로를 구동한다.
 ///
@@ -29,6 +37,14 @@ use anyhow::{Result, anyhow};
 /// rundll32로 띄운 **독립 프로세스**에서 실행한다. GUI는 실행 중인 HWP에 COM으로 재접속한다.
 pub fn run_gui() -> Result<()> {
     let cfg = config::Config::load().map_err(|e| anyhow!("설정 오류: {e}"))?;
+    // 키는 남기지 않고 있는지 여부만 남긴다.
+    tracing::info!(
+        provider = ?cfg.llm_provider,
+        model = %cfg.llm_model,
+        base_url = %cfg.llm_base_url,
+        has_key = !cfg.llm_api_key.is_empty(),
+        "설정 읽음"
+    );
     let window = gui::MainWindow::new(cfg);
     window.run().map_err(|e| anyhow!("GUI 실행 오류: {e}"))?;
     Ok(())

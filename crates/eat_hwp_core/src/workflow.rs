@@ -5,6 +5,7 @@
 //! (결과 입력은 후속 증분에서 연결한다.)
 
 use crate::config::Config;
+use crate::hwp::DocContent;
 use crate::llm::LlmBackend;
 use crate::parse;
 use anyhow::Result;
@@ -16,18 +17,96 @@ use anyhow::Result;
 pub fn run_prompt(
     _cfg: &Config,
     backend: &dyn LlmBackend,
-    hwpml: &str,
+    content: &DocContent,
+    format: DocFormat,
     user_prompt: &str,
-    caret: Option<usize>,
 ) -> Result<String> {
-    let doc = parse::parse_hwpml(hwpml)?;
-
     // 커서 정보가 없으면(예: EAT_HWP_DOC 테스트 경로) 표시 없이 문서 전체만 보낸다.
-    let context = parse::document_text(&doc, caret);
+    let context = match (content, format) {
+        (DocContent::Hwpml { hwpml, caret }, DocFormat::Plain) => {
+            parse::document_text(&parse::parse_hwpml(hwpml)?, *caret)
+        }
+        (DocContent::Hwpml { hwpml, caret }, DocFormat::Hwpml | DocFormat::HwpmlFile) => {
+            parse::hwpml_for_llm(hwpml, *caret)
+        }
+        (DocContent::Markdown(md), DocFormat::Markdown) => md.clone(),
+        _ => anyhow::bail!("읽은 문서 내용이 고른 형식({})과 맞지 않음", format.label()),
+    };
     let has_caret = context.contains(parse::CARET_MARK);
 
-    let prompt = build_prompt(&context, user_prompt, has_caret);
+    let prompt = build_prompt(&context, user_prompt, has_caret, format);
+    tracing::debug!(
+        ?format,
+        has_caret,
+        context_chars = context.chars().count(),
+        prompt_chars = prompt.chars().count(),
+        "프롬프트 구성"
+    );
+    // 문서 내용이 통째로 들어가므로 TRACE에서만 남긴다(EAT_HWP_LOG=trace).
+    tracing::trace!(%prompt, "프롬프트 전문");
     backend.complete(&prompt)
+}
+
+/// LLM에 보낼 문서 형식. GUI에서 고른다.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DocFormat {
+    /// HWPML에서 글자만 뽑아 한 문단에 한 줄로 이은 평문.
+    Plain,
+    /// `GetTextFile("HWPML2X")` 원문(XML). 글자·문단 모양까지 들어 있다.
+    Hwpml,
+    /// `SaveAs(경로, "HWPML2X", "lock:false")`로 저장한 HWPML 파일(XML). 커서 위치는 없다.
+    HwpmlFile,
+    /// `SaveAs`로 HWPX를 저장해 hwp2md로 바꾼 Markdown. 제목·표 구조가 남는다.
+    Markdown,
+}
+
+impl DocFormat {
+    /// GUI에서 처음 골라져 있는 형식.
+    pub const DEFAULT: DocFormat = DocFormat::Markdown;
+
+    /// GUI 목록 순서.
+    pub const ALL: [DocFormat; 4] = [
+        DocFormat::Plain,
+        DocFormat::Hwpml,
+        DocFormat::Markdown,
+        DocFormat::HwpmlFile,
+    ];
+
+    /// GUI 목록에 보일 이름.
+    pub fn label(self) -> &'static str {
+        match self {
+            DocFormat::Plain => "평문 (글자만)",
+            DocFormat::Hwpml => "HWPML (GetTextFile 원문)",
+            DocFormat::Markdown => "Markdown (HWPX 저장 → hwp2md)",
+            DocFormat::HwpmlFile => "HWPML (SaveAs 파일, 커서 위치 없음)",
+        }
+    }
+
+    /// 대화 머리줄에 붙일 짧은 이름.
+    pub fn short(self) -> &'static str {
+        match self {
+            DocFormat::Plain => "평문",
+            DocFormat::Hwpml => "HWPML",
+            DocFormat::Markdown => "Markdown",
+            DocFormat::HwpmlFile => "HWPML 파일",
+        }
+    }
+
+    /// 프롬프트에서 문서 내용의 형식을 설명하는 문장.
+    fn describe(self) -> &'static str {
+        match self {
+            DocFormat::Plain => "문서 내용은 한글 문서에서 글자만 뽑은 것으로, 한 줄이 한 문단입니다.",
+            DocFormat::Hwpml | DocFormat::HwpmlFile => {
+                "문서 내용은 한글 문서의 HWPML 2.x(XML) 원문입니다. 본문은 BODY의 P(문단) > TEXT > CHAR에 \
+                 있고, 글자 모양·문단 모양은 HEAD의 CHARSHAPE·PARASHAPE를 CharShape·ParaShape 번호로 \
+                 참조합니다."
+            }
+            DocFormat::Markdown => {
+                "문서 내용은 한글 문서를 Markdown으로 바꾼 것입니다. 제목은 #, 표는 | 구문으로 \
+                 나타냅니다."
+            }
+        }
+    }
 }
 
 /// 문서 양식 준수 지침을 포함한 프롬프트를 구성한다.
@@ -37,7 +116,12 @@ pub fn run_prompt(
 ///
 /// 답변은 문서에 그대로 넣을 본문이어야 하므로, 설명·인사말·마크다운을 붙이지 말라고 지시한다.
 /// `has_caret`이면 문서 안의 [`parse::CARET_MARK`]가 커서 위치라는 것을 알려 준다.
-fn build_prompt(doc_context: &str, user_prompt: &str, has_caret: bool) -> String {
+fn build_prompt(
+    doc_context: &str,
+    user_prompt: &str,
+    has_caret: bool,
+    format: DocFormat,
+) -> String {
     let caret_rule = if has_caret {
         format!(
             "- 문서 내용 안의 {mark} 표시가 사용자의 커서 위치입니다. 사용자 요청의 \"커서 자리\", \
@@ -51,10 +135,12 @@ fn build_prompt(doc_context: &str, user_prompt: &str, has_caret: bool) -> String
     format!(
         "당신은 HWP 문서 작성 도우미입니다. 아래 문서의 양식(제목/소제목/문단 구조)을 최대한 \
          준수하여, 사용자 요청에 맞는 내용을 한국어로 작성하세요.\n\
+         - {}\n\
          {caret_rule}\
          - 답변은 문서에 바로 들어갈 본문만 씁니다. 인사말, 설명, 앞뒤 안내 문장, 마크다운 기호\
          (**, #, ---)를 붙이지 않습니다.\n\n\
          === 문서 내용 ===\n{doc_context}\n\n\
-         === 사용자 요청 ===\n{user_prompt}\n"
+         === 사용자 요청 ===\n{user_prompt}\n",
+        format.describe()
     )
 }

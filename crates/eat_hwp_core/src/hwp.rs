@@ -10,17 +10,24 @@
 //! - 문서 내용은 `GetTextFile`(HWPML2X)로 읽는다. 파일로 저장하지 않는다.
 
 use anyhow::{Result, anyhow, bail};
+use hwp_com::method::hwp_object::{FileFormat, GetTextFileFormat};
 use hwp_com::{HwpClient, HwpObject};
 
-/// 현재 문서의 HWPML과 그 안에서의 커서 위치.
+/// 현재 문서에서 읽은 내용.
 #[derive(Clone, Debug)]
 pub struct DocSnapshot {
-    /// 문서 전체의 HWPML 2.x 문자열.
-    pub hwpml: String,
-    /// `hwpml` 안에서 커서가 있는 바이트 위치. 커서를 알 수 없으면 `None`.
-    pub caret: Option<usize>,
+    pub content: DocContent,
     /// 문서 파일 경로. 한 번도 저장하지 않은 문서는 빈 문자열. 대화 기록을 문서별로 나누는 데 쓴다.
     pub path: String,
+}
+
+/// 문서 내용. LLM에 보낼 형식에 따라 읽는 방법이 다르다.
+#[derive(Clone, Debug)]
+pub enum DocContent {
+    /// `GetTextFile("HWPML2X")` 원문과 그 안의 커서 바이트 위치(모르면 `None`). 평문·HWPML 형식에 쓴다.
+    Hwpml { hwpml: String, caret: Option<usize> },
+    /// HWPX로 저장해 hwp2md로 바꾼 Markdown. 커서 자리에 `parse::CARET_MARK`가 들어 있을 수 있다.
+    Markdown(String),
 }
 
 /// 실행 중인 한글 인스턴스에 연결한다.
@@ -44,8 +51,89 @@ pub fn document_snapshot(hwp: &HwpObject) -> Result<DocSnapshot> {
         bail!("GetTextFile(HWPML2X)가 빈 문자열을 반환했습니다");
     }
     Ok(DocSnapshot {
-        hwpml: caret.hwpml,
-        caret: Some(caret.offset),
+        content: DocContent::Hwpml {
+            hwpml: caret.hwpml,
+            caret: Some(caret.offset),
+        },
+        path: hwp.path().unwrap_or_default(),
+    })
+}
+
+/// 현재 문서를 `SaveAs(경로, "HWPML2X", "lock:false")`로 사용자 임시 디렉터리에 저장하고 읽은 뒤
+/// 지운다. 커서 위치는 알 수 없다(책갈피를 넣는 API가 hwp_automation_rs에 공개돼 있지 않다).
+///
+/// `lock:false`라 열린 문서는 원래 파일에 그대로 묶여 있다. 한글은 마지막으로 `SaveAs`한 파일을
+/// 삭제 공유 없이 열어 두므로, `GetTextFile("TEXT")`을 한 번 불러 놓게 한 뒤 지운다
+/// (hwp_automation_rs의 `hwpx_with_caret`과 같은 방법).
+pub fn document_hwpml_file(hwp: &HwpObject) -> Result<DocSnapshot> {
+    let file = std::env::temp_dir().join(format!(
+        "eat_hwp_raw_{}_{}.hml",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or_default()
+    ));
+    let path = file
+        .to_str()
+        .ok_or_else(|| anyhow!("임시 파일 경로를 문자열로 바꿀 수 없음: {}", file.display()))?;
+    hwp.save_as(path, &FileFormat::HWPML2X, "lock:false")
+        .map_err(|e| anyhow!("SaveAs(HWPML2X) 실패: {e}"))?;
+    let _ = hwp.get_text_file(GetTextFileFormat::Text, false);
+    let bytes = std::fs::read(&file);
+    let _ = std::fs::remove_file(&file);
+    let bytes = bytes.map_err(|e| anyhow!("저장한 HWPML 파일을 읽지 못함: {}: {e}", file.display()))?;
+    tracing::debug!(
+        file = %file.display(),
+        bytes = bytes.len(),
+        bom = ?bytes.get(..3),
+        "SaveAs(HWPML2X) 파일 읽음"
+    );
+    let hwpml = decode_text(&bytes);
+    if hwpml.is_empty() {
+        bail!("SaveAs(HWPML2X)로 저장한 파일이 비어 있음");
+    }
+    Ok(DocSnapshot {
+        content: DocContent::Hwpml { hwpml, caret: None },
+        path: hwp.path().unwrap_or_default(),
+    })
+}
+
+/// 저장된 텍스트 파일을 BOM으로 판단해 문자열로 바꾼다(UTF-16LE/BE, UTF-8, BOM 없으면 UTF-8로 보고
+/// 실패하면 UTF-16LE).
+fn decode_text(bytes: &[u8]) -> String {
+    let utf16 = |data: &[u8], le: bool| {
+        let units: Vec<u16> = data
+            .chunks_exact(2)
+            .map(|c| if le { u16::from_le_bytes([c[0], c[1]]) } else { u16::from_be_bytes([c[0], c[1]]) })
+            .collect();
+        String::from_utf16_lossy(&units)
+    };
+    match bytes {
+        [0xFF, 0xFE, rest @ ..] => utf16(rest, true),
+        [0xFE, 0xFF, rest @ ..] => utf16(rest, false),
+        [0xEF, 0xBB, 0xBF, rest @ ..] => String::from_utf8_lossy(rest).into_owned(),
+        _ => match std::str::from_utf8(bytes) {
+            Ok(s) => s.to_string(),
+            Err(_) => utf16(bytes, true),
+        },
+    }
+}
+
+/// 현재 문서를 커서 책갈피와 함께 임시 HWPX로 저장(`ExtDoc::hwpx_with_caret`, `SaveAs`)하고
+/// hwp2md로 Markdown으로 바꾼다. 임시 HWPX는 바꾼 뒤 지운다.
+///
+/// 열린 문서의 경로·형식은 그대로지만, 책갈피를 넣었다 되돌리므로 문서가 "변경됨"이 되고 다시 실행
+/// 기록이 바뀐다.
+pub fn document_markdown(hwp: &HwpObject) -> Result<DocSnapshot> {
+    let hwpx = hwp
+        .ext_doc()
+        .hwpx_with_caret()
+        .map_err(|e| anyhow!("커서 표시가 든 HWPX 저장 실패: {e}"))?;
+    tracing::debug!(hwpx = %hwpx.path().display(), bookmark = hwpx.bookmark_name(), "임시 HWPX 저장");
+    let md = crate::markdown::hwpx_to_markdown(hwpx.path(), Some(hwpx.bookmark_name()))?;
+    Ok(DocSnapshot {
+        content: DocContent::Markdown(md),
         path: hwp.path().unwrap_or_default(),
     })
 }

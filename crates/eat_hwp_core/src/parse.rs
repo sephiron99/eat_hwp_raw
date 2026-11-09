@@ -206,3 +206,61 @@ fn paragraph_pieces(para: Node) -> Vec<Piece> {
     }
     pieces
 }
+
+/// HWPML 원문을 LLM에 보낼 형태로 만든다. `caret` 자리에 [`CARET_MARK`]를 넣고, 그림 등의
+/// 바이너리 데이터(`BINDATASTORAGE`, base64)는 글이 아니고 크기만 크므로 비운다.
+pub fn hwpml_for_llm(hwpml: &str, caret: Option<usize>) -> String {
+    let marked = match caret {
+        Some(at) if hwpml.is_char_boundary(at) => insert_caret_mark(hwpml, at),
+        _ => hwpml.to_string(),
+    };
+    strip_bindata(&marked)
+}
+
+/// `at`에 [`CARET_MARK`]를 넣는다. `at`이 태그 안이면(빈 문단의 `<TEXT .../>`처럼) 태그를 열고
+/// 닫아 그 안에 넣고, 그 밖의 태그 안이면 태그 바로 뒤에 넣는다.
+fn insert_caret_mark(xml: &str, at: usize) -> String {
+    let before = &xml[..at];
+    let after = &xml[at..];
+    let in_tag = match (before.rfind('<'), before.rfind('>')) {
+        (Some(lt), Some(gt)) => lt > gt,
+        (Some(_), None) => true,
+        _ => false,
+    };
+    if !in_tag {
+        return format!("{before}{CARET_MARK}{after}");
+    }
+    let lt = before.rfind('<').unwrap_or(0);
+    if let Some(rest) = after.strip_prefix("/>") {
+        let name: String = xml[lt + 1..]
+            .chars()
+            .take_while(|c| !c.is_whitespace() && *c != '/' && *c != '>')
+            .collect();
+        return format!("{before}>{CARET_MARK}</{name}>{rest}");
+    }
+    match after.find('>') {
+        Some(gt) => format!(
+            "{before}{}{CARET_MARK}{}",
+            &after[..=gt],
+            &after[gt + 1..]
+        ),
+        None => format!("{xml}{CARET_MARK}"),
+    }
+}
+
+/// `<BINDATASTORAGE ...>...</BINDATASTORAGE>`의 내용을 비운다.
+fn strip_bindata(xml: &str) -> String {
+    const OPEN: &str = "<BINDATASTORAGE";
+    const CLOSE: &str = "</BINDATASTORAGE>";
+    let (Some(start), Some(end)) = (xml.find(OPEN), xml.rfind(CLOSE)) else {
+        return xml.to_string();
+    };
+    if end < start {
+        return xml.to_string();
+    }
+    format!(
+        "{}<!-- 그림 등 바이너리 데이터 생략 -->{}",
+        &xml[..start],
+        &xml[end + CLOSE.len()..]
+    )
+}

@@ -98,6 +98,14 @@ GUI는 `eat_hwp_addon`에 두고 독립 프로세스로 실행한다. 구성:
 1. Claude API 키 입력 칸(가림 표시). 키를 넣으면 Claude API로 실행하고, 비우면 환경 변수 설정대로
    실행한다. 입력한 키는 저장하지 않으며 창을 닫으면 사라진다. LLM 설정을 서버에 두는 목표 구조에서는
    이 칸이 클라이언트 GUI에 남지 않는다
+1. LLM에 보낼 문서 형식 칸(목록). 기본은 Markdown(`workflow::DocFormat::DEFAULT`)
+   - **평문**: `GetTextFile`(HWPML2X)에서 글자만 뽑아 한 문단에 한 줄로 이은 것. 커서 자리에 `[[커서]]`
+   - **HWPML (GetTextFile 원문)**: HWPML2X XML 그대로. 커서 자리에 `[[커서]]`, 그림 등 `BINDATASTORAGE`는 비움
+   - **Markdown (HWPX 저장 → hwp2md)**: 임시 HWPX를 hwp2md로 바꾼 것. 제목·표 구조가 남고 커서 자리에 `[[커서]]`
+   - **HWPML (SaveAs 파일)**: `SaveAs(경로, "HWPML2X", "lock:false")`로 저장한 파일. 커서 위치는 없다(책갈피를
+     넣는 API가 hwp_automation_rs에 공개돼 있지 않음)
+
+   형식마다 프롬프트에 문서 내용의 형식 설명이 붙고, 대화의 AI 머리줄에 형식 이름이 보인다
 1. 모델 칸(편집형 콤보박스)과 "상태 확인" 버튼. 목록에서 고르거나 직접 입력하며, 비우면
    `EAT_HWP_LLM_MODEL` 설정대로 실행한다
 1. LLM 상태 줄: 지금 설정(키 칸 포함)이 가리키는 서버의 상태를 보인다(✔ 작동 중 / ✖ 연결 안 됨 / ✖ 인증
@@ -144,6 +152,12 @@ cargo build
 cargo check
 ```
 
+### 로그
+개발 편의용 `tracing` 로그. 구독자는 애드온 크레이트가 `hwp_addon::logging`으로 설치하고, 파일은 대화 기록과
+같은 `%USERPROFILE%\.eat_hwp_raw\chats`에 둔다(한글 프로세스의 애드온은 `eat_hwp_addon.log`, rundll32 GUI
+프로세스는 `eat_hwp_raw_gui.log`, 시작할 때마다 비움). 수준은 `EAT_HWP_LOG`(error/warn/info/debug/trace, 기본
+debug). trace면 LLM에 보내는 프롬프트 전문(문서 내용 포함)까지 남는다. API 키는 남기지 않는다.
+
 ### unsafe policy
 워크스페이스의 모든 크레이트(`crates/eat_hwp_addon`, `crates/eat_hwp_server`, 삭제 전까지의 `crates/eat_hwp_core`) 루트에
 `#![forbid(unsafe_code)]` 적용. DLL export(`QueryUserActionInterface`, `RunGuiW`)는 `hwp_addon`의
@@ -162,13 +176,19 @@ unsafe가 필요한 기능은 이 프로젝트에 두지 않고 hwp_automation_r
 1. [hwp_automation_rs](https://github.com/sephiron99/hwp_automation_rs) 에서 hwp_com을 기반으로 작성하되, 필요할 때에는 hwp_addon도 사용한다.
 1. 문서 내용: `GetTextFile`(`GetTextFileFormat::HwpMl2X`)로 HWPML 문자열을 받는다.
    커서 위치는 `hwp.ext_doc().hwpml_with_caret()`(`ExtDoc`)이 돌려주는 HWPML 안의 바이트 위치로 찾는다(`GetPos` 번호는 쓰지 않음)
+1. Markdown 형식: `hwp.ext_doc().hwpx_with_caret()`로 커서 책갈피가 든 임시 HWPX를 저장하고, 책갈피를
+   `[[커서]]` 글자로 바꾼 사본(zip)을 [hwp2md](https://github.com/sephiron99/hwp2md)(로컬 `../hwp2md`,
+   GPL-3.0-only)로 Markdown으로 바꾼다. hwp2md의 comrak은 기본 기능(syntect의 C 라이브러리)을 꺼야
+   i686-pc-windows-msvc로 교차 빌드된다
 
 ## 유의사항 및 준수사항
 1. hwp_automation_rs에 없는 hwp com/action/api는 hwp_automation_rs에 해당
    기능을 추가하도록 제시. 단, addon같은 산출물은 hwp_automation_rs에 속하지
    않고, 이 프로젝트의 일부임.
 1. eat_hwp_raw 프로젝트에 hwp action/method/parameter을 추가하지 못함.
-1. 문서 내용은 Hwp sdk의 GetTextFile(HWPML2X)로 읽고, 결과는 SetTextFile로 넣는다. SaveAs로 임시 파일을 만들거나 hwpx를 파싱하지 않는다.
+1. 문서 내용은 GUI에서 고른 형식에 따라 읽고, 결과는 SetTextFile로 넣는다. 기본 형식인 Markdown과 HWPML
+   파일 형식은 SaveAs(`lock:false`)로 사용자 임시 디렉터리에 HWPX·HWPML 파일을 만들고 읽은 뒤 지운다.
+   평문과 HWPML 원문 형식은 GetTextFile(HWPML2X)로 읽는다.
 
 ## 라이선스
 GPL-3.0-or-later. 전문은 `LICENSE`, 각 크레이트 `Cargo.toml`의 `license` 필드도 같다. GPL은 이 저장소의

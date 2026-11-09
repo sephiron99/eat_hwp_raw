@@ -7,6 +7,8 @@
 //! 구성:
 //! - Claude API 키 입력 칸(비우면 환경 변수 설정대로 실행)
 //! - 모델 칸: 백엔드가 제공하는 모델 목록에서 고르거나 직접 입력
+//! - 문서 형식 칸: LLM에 보낼 문서 텍스트의 형식(평문 / HWPML 원문 / HWPX→Markdown /
+//!   SaveAs HWPML 파일)을 고른다
 //! - LLM 상태 줄: 지금 설정(키 칸 포함)이 가리키는 서버가 작동하는지 보인다. 창을 열 때, "상태 확인"을
 //!   누를 때, 키 칸에서 나갈 때 서버에 모델 목록을 요청해 점검하고(모델 칸 목록도 이때 채운다),
 //!   요청이 성공하면 "작동 중"으로, 실패하면 다시 점검해 원인(연결 안 됨, 인증 실패 등)을 보인다
@@ -29,9 +31,10 @@
 
 use crate::chat_store;
 use crate::config::{Config, Provider};
-use crate::hwp::{self, DocSnapshot};
+use crate::hwp::{self, DocContent, DocSnapshot};
+use crate::markdown;
 use crate::llm::{self, LlmBackend, RigBackend, ServerState, ServerStatus};
-use crate::workflow;
+use crate::workflow::{self, DocFormat};
 use anyhow::{Result, anyhow};
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -87,6 +90,9 @@ pub struct MainWindow {
     #[allow(dead_code)]
     lbl_model: gui::Label,
     cmb_model: gui::ComboBox,
+    #[allow(dead_code)]
+    lbl_format: gui::Label,
+    cmb_format: gui::ComboBox,
     btn_models: gui::Button,
     #[allow(dead_code)]
     lbl_status: gui::Label,
@@ -160,17 +166,17 @@ impl MainWindow {
             &wnd,
             gui::LabelOpts {
                 text: "대화",
-                position: gui::dpi(10, 126),
+                position: gui::dpi(10, 156),
                 ..Default::default()
             },
         );
         let txt_chat = gui::Edit::new(
             &wnd,
             gui::EditOpts {
-                position: gui::dpi(10, 144),
+                position: gui::dpi(10, 174),
                 resize_behavior: (gui::Horz::Resize, gui::Vert::Resize),
                 width: gui::dpi_x(500),
-                height: gui::dpi_y(232),
+                height: gui::dpi_y(202),
                 control_style: co::ES::MULTILINE
                     | co::ES::AUTOVSCROLL
                     | co::ES::NOHIDESEL
@@ -254,6 +260,28 @@ impl MainWindow {
                 ..Default::default()
             },
         );
+        let lbl_format = gui::Label::new(
+            &wnd,
+            gui::LabelOpts {
+                text: "LLM에 보낼 문서",
+                position: gui::dpi(10, 130),
+                ..Default::default()
+            },
+        );
+        let format_labels: Vec<&str> = DocFormat::ALL.iter().map(|f| f.label()).collect();
+        let cmb_format = gui::ComboBox::new(
+            &wnd,
+            gui::ComboBoxOpts {
+                position: gui::dpi(120, 126),
+                width: gui::dpi_x(270),
+                items: &format_labels,
+                selected_item: DocFormat::ALL
+                    .iter()
+                    .position(|f| *f == DocFormat::DEFAULT)
+                    .map(|i| i as u32),
+                ..Default::default()
+            },
+        );
         SERVER_UI.with_borrow_mut(|ui| *ui = Some((cmb_model.clone(), lbl_status.clone())));
 
         let new_self = Self {
@@ -267,6 +295,8 @@ impl MainWindow {
             txt_api_key,
             lbl_model,
             cmb_model,
+            lbl_format,
+            cmb_format,
             btn_models,
             lbl_status,
             cfg: Arc::new(cfg),
@@ -286,6 +316,7 @@ impl MainWindow {
         let btn_run = self.btn_run.clone();
         let txt_api_key = self.txt_api_key.clone();
         let cmb_model = self.cmb_model.clone();
+        let cmb_format = self.cmb_format.clone();
         let cfg = Arc::clone(&self.cfg);
 
         // 창이 만들어지면 모델 칸에 설정의 모델을 넣고 목록을 받아 온다.
@@ -352,6 +383,11 @@ impl MainWindow {
 
         self.btn_run.on().bn_clicked(move || {
             let user_prompt = txt_prompt.text().unwrap_or_default();
+            let format = cmb_format
+                .items()
+                .selected_index()
+                .and_then(|i| DocFormat::ALL.get(i as usize).copied())
+                .unwrap_or(DocFormat::DEFAULT);
             // 키를 입력했으면 Claude API로, 비웠으면 환경 변수 설정대로 실행한다.
             // 모델 칸이 비어 있지 않으면 그 모델을 쓴다.
             let api_key = txt_api_key.text().unwrap_or_default();
@@ -366,9 +402,25 @@ impl MainWindow {
             // 워커 스레드로 넘길 Send 상태만 복제.
             let wnd = wnd.clone();
 
+            tracing::info!(
+                ?format,
+                provider = ?cfg.llm_provider,
+                model = %cfg.llm_model,
+                prompt_chars = user_prompt.chars().count(),
+                "보내기"
+            );
             std::thread::spawn(move || {
                 let started = Instant::now();
-                let doc = acquire_document();
+                let doc = acquire_document(format);
+                match &doc {
+                    Ok(d) => tracing::info!(
+                        ?format,
+                        path = %d.path,
+                        elapsed_ms = started.elapsed().as_millis(),
+                        "문서 읽음"
+                    ),
+                    Err(e) => tracing::warn!(?format, error = %format!("{e:#}"), "문서 읽기 실패"),
+                }
                 // 읽은 문서와 API 종류의 대화로 바꾼 뒤 프롬프트를 쌓는다. 읽기에 실패하면 지금
                 // 대화에 쌓고 오류로 마친다.
                 {
@@ -386,10 +438,26 @@ impl MainWindow {
                 // 키가 실행마다 달라질 수 있어 백엔드는 실행할 때 만든다.
                 let result = doc.and_then(|doc| {
                     RigBackend::new(&cfg)
-                        .and_then(|backend| run_workflow(&cfg, &backend, &doc, &user_prompt))
+                        .and_then(|backend| run_workflow(&cfg, &backend, &doc, format, &user_prompt))
                 });
+                match &result {
+                    Ok(answer) => tracing::info!(
+                        elapsed_ms = started.elapsed().as_millis(),
+                        answer_chars = answer.chars().count(),
+                        "응답 받음"
+                    ),
+                    Err(e) => tracing::warn!(
+                        elapsed_ms = started.elapsed().as_millis(),
+                        error = %format!("{e:#}"),
+                        "요청 실패"
+                    ),
+                }
                 let secs = started.elapsed().as_secs();
-                let header = format!("◀ AI ({}, {secs}초)", cfg.llm_model);
+                let header = format!(
+                    "◀ AI ({}, {}, {secs}초)",
+                    cfg.llm_model,
+                    format.short()
+                );
                 let wnd_ui = wnd.clone();
                 wnd.run_ui_thread(move || {
                     match &result {
@@ -434,6 +502,12 @@ fn check_server(wnd: &gui::WindowMain, cfg: Arc<Config>) {
     let wnd = wnd.clone();
     std::thread::spawn(move || {
         let status = llm::check_server(&cfg);
+        tracing::info!(
+            target = %status.target,
+            state = %status.state.summary(),
+            elapsed_ms = status.elapsed_ms,
+            "LLM 서버 점검"
+        );
         let default_model = cfg.llm_model.clone();
         let provider = cfg.llm_provider;
         wnd.run_ui_thread(move || {
@@ -596,6 +670,7 @@ fn chat_set_context(doc_path: Option<String>, provider: Provider) {
         if file == chat.file {
             return;
         }
+        tracing::debug!(file = ?file, "대화 기록 전환");
         chat.file = file;
         let text = chat
             .file
@@ -617,6 +692,7 @@ fn chat_save() {
         Some(chat_store::save(file, &text))
     });
     if let Some(Err(e)) = saved {
+        tracing::warn!(error = %format!("{e:#}"), "대화 기록 저장 실패");
         set_status(&format!("대화 기록 저장 실패: {e:#}"));
     }
 }
@@ -689,33 +765,44 @@ fn to_crlf(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\n', "\r\n")
 }
 
-/// 확보한 문서 내용(HWPML)과 커서 위치로 워크플로를 실행한다.
+/// 확보한 문서 내용으로 워크플로를 실행한다.
 fn run_workflow(
     cfg: &Config,
     backend: &dyn LlmBackend,
     doc: &DocSnapshot,
+    format: DocFormat,
     user_prompt: &str,
 ) -> Result<String> {
-    workflow::run_prompt(cfg, backend, &doc.hwpml, user_prompt, doc.caret)
+    workflow::run_prompt(cfg, backend, &doc.content, format, user_prompt)
 }
 
-/// 문서의 HWPML과(가능하면) 커서 위치를 확보한다.
+/// 고른 형식에 맞게 문서 내용과(가능하면) 커서 위치를 확보한다.
 ///
-/// 1) 환경변수 `EAT_HWP_DOC`가 지정되면 그 HWPML 파일을 읽는다(테스트 경로, 커서 위치 없음).
-/// 2) 아니면 실행 중인 한글에 연결 → HWPML과 그 안의 커서 위치 확보.
-fn acquire_document() -> Result<DocSnapshot> {
+/// 1) 환경변수 `EAT_HWP_DOC`가 지정되면 그 파일을 읽는다(테스트 경로, 커서 위치 없음). 평문·HWPML
+///    형식은 HWPML 파일, Markdown 형식은 `.hwpx` 파일이어야 한다.
+/// 2) 아니면 실행 중인 한글에 연결한다. 평문·HWPML은 `GetTextFile`(HWPML2X)과 커서 위치를,
+///    Markdown은 커서 책갈피를 넣어 임시 HWPX로 저장(`SaveAs`)한 뒤 hwp2md로 바꾼 것을,
+///    HWPML 파일은 `SaveAs(HWPML2X, "lock:false")`로 임시 저장한 파일을 얻는다.
+fn acquire_document(format: DocFormat) -> Result<DocSnapshot> {
     if let Ok(p) = std::env::var("EAT_HWP_DOC") {
         if !p.is_empty() {
-            // 테스트 경로: 기존 HWPML 파일만 사용하고 라이브 커서 위치는 없다.
-            let hwpml = std::fs::read_to_string(&p)
-                .map_err(|e| anyhow!("EAT_HWP_DOC 파일을 읽지 못함: {p}: {e}"))?;
-            return Ok(DocSnapshot {
-                hwpml,
-                caret: None,
-                path: p,
-            });
+            let content = match format {
+                DocFormat::Markdown => {
+                    DocContent::Markdown(markdown::hwpx_to_markdown(std::path::Path::new(&p), None)?)
+                }
+                DocFormat::Plain | DocFormat::Hwpml | DocFormat::HwpmlFile => DocContent::Hwpml {
+                    hwpml: std::fs::read_to_string(&p)
+                        .map_err(|e| anyhow!("EAT_HWP_DOC 파일을 읽지 못함: {p}: {e}"))?,
+                    caret: None,
+                },
+            };
+            return Ok(DocSnapshot { content, path: p });
         }
     }
     let hwp = hwp::connect()?;
-    hwp::document_snapshot(&hwp)
+    match format {
+        DocFormat::Plain | DocFormat::Hwpml => hwp::document_snapshot(&hwp),
+        DocFormat::Markdown => hwp::document_markdown(&hwp),
+        DocFormat::HwpmlFile => hwp::document_hwpml_file(&hwp),
+    }
 }
