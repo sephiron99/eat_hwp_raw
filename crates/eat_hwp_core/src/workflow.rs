@@ -34,17 +34,20 @@ pub fn run_prompt(
     };
     let has_caret = context.contains(parse::CARET_MARK);
 
-    let prompt = build_prompt(&context, user_prompt, has_caret, format);
+    let system = build_system(format, has_caret);
+    let user = build_user(&context, user_prompt);
     tracing::debug!(
         ?format,
         has_caret,
         context_chars = context.chars().count(),
-        prompt_chars = prompt.chars().count(),
+        system_chars = system.chars().count(),
+        user_chars = user.chars().count(),
         "프롬프트 구성"
     );
+    tracing::trace!(%system, "시스템 메시지 전문");
     // 문서 내용이 통째로 들어가므로 TRACE에서만 남긴다(EAT_HWP_LOG=trace).
-    tracing::trace!(%prompt, "프롬프트 전문");
-    backend.complete(&prompt)
+    tracing::trace!(%user, "사용자 메시지 전문");
+    backend.complete(&system, &user)
 }
 
 /// LLM에 보낼 문서 형식. GUI에서 고른다.
@@ -109,38 +112,36 @@ impl DocFormat {
     }
 }
 
-/// 문서 양식 준수 지침을 포함한 프롬프트를 구성한다.
+/// 시스템 메시지: 코드가 정하는 규약 지시(역할, 답변 규칙, 문서 형식 설명, 커서 표시 규칙).
 ///
 /// features(CLAUDE.md): 양식(제목/소제목/문단 구조)을 최대한 준수하고, 인접 제목/소제목
-/// 레벨에 상응하도록 작성한다.
+/// 레벨에 상응하도록 작성한다. 답변은 문서에 그대로 넣을 본문이어야 하므로 설명·인사말·마크다운을
+/// 붙이지 말라고 지시한다. `has_caret`이면 문서 안의 [`parse::CARET_MARK`]가 커서 위치라고 알린다.
 ///
-/// 답변은 문서에 그대로 넣을 본문이어야 하므로, 설명·인사말·마크다운을 붙이지 말라고 지시한다.
-/// `has_caret`이면 문서 안의 [`parse::CARET_MARK`]가 커서 위치라는 것을 알려 준다.
-fn build_prompt(
-    doc_context: &str,
-    user_prompt: &str,
-    has_caret: bool,
-    format: DocFormat,
-) -> String {
-    let caret_rule = if has_caret {
-        format!(
+/// 매 요청 같은 문장을 앞에 두고 형식·커서에 따라 바뀌는 문장을 뒤에 둔다. 앞부분이 같으면 로컬
+/// 서버가 이전 계산을 재사용할 여지가 있다. 나중에 사용자가 고칠 수 있는 시스템 프롬프트를 더하더라도
+/// 이 규약 부분은 코드가 갖는다(바꾸면 결과를 문서에 넣는 흐름이 깨진다).
+fn build_system(format: DocFormat, has_caret: bool) -> String {
+    let mut system = String::from(
+        "당신은 HWP 문서 작성 도우미입니다. 사용자가 보낸 문서의 양식(제목/소제목/문단 구조)을 최대한 \
+         준수하여, 사용자 요청에 맞는 내용을 한국어로 작성하세요.\n\
+         - 사용자 메시지는 \"=== 문서 내용 ===\"과 \"=== 사용자 요청 ===\" 두 부분으로 되어 있습니다.\n\
+         - 답변은 문서에 바로 들어갈 본문만 씁니다. 인사말, 설명, 앞뒤 안내 문장, 마크다운 기호\
+         (**, #, ---)를 붙이지 않습니다.\n",
+    );
+    system.push_str(&format!("- {}\n", format.describe()));
+    if has_caret {
+        system.push_str(&format!(
             "- 문서 내용 안의 {mark} 표시가 사용자의 커서 위치입니다. 사용자 요청의 \"커서 자리\", \
              \"이 자리\", \"여기\"는 이 위치를 뜻합니다.\n\
              - 답변은 {mark} 자리에 그대로 넣을 글만 씁니다. {mark} 표시는 답변에 넣지 않습니다.\n",
             mark = parse::CARET_MARK
-        )
-    } else {
-        String::new()
-    };
-    format!(
-        "당신은 HWP 문서 작성 도우미입니다. 아래 문서의 양식(제목/소제목/문단 구조)을 최대한 \
-         준수하여, 사용자 요청에 맞는 내용을 한국어로 작성하세요.\n\
-         - {}\n\
-         {caret_rule}\
-         - 답변은 문서에 바로 들어갈 본문만 씁니다. 인사말, 설명, 앞뒤 안내 문장, 마크다운 기호\
-         (**, #, ---)를 붙이지 않습니다.\n\n\
-         === 문서 내용 ===\n{doc_context}\n\n\
-         === 사용자 요청 ===\n{user_prompt}\n",
-        format.describe()
-    )
+        ));
+    }
+    system
+}
+
+/// 사용자 메시지: 요청마다 바뀌는 데이터(문서 내용, 사용자 요청)만 담는다.
+fn build_user(doc_context: &str, user_prompt: &str) -> String {
+    format!("=== 문서 내용 ===\n{doc_context}\n\n=== 사용자 요청 ===\n{user_prompt}\n")
 }

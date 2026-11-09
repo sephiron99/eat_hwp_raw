@@ -17,14 +17,11 @@ use rig::providers::openai::wire::Chat;
 /// Claude API 응답의 최대 출력 토큰. Messages API는 이 값을 반드시 요구한다.
 const ANTHROPIC_MAX_TOKENS: u64 = 16_000;
 
-/// 양식 준수를 위한 기본 시스템 지침(preamble).
-/// features(CLAUDE.md): 제목/소제목/문단 구조 등 문서 양식을 최대한 준수한다.
-const DEFAULT_PREAMBLE: &str = "당신은 HWP 문서 작성 도우미입니다. \
-주어진 문서의 양식(제목/소제목/문단 구조)을 최대한 준수하여 한국어로 작성하세요.";
-
-/// 프롬프트를 받아 응답 텍스트를 생성하는 LLM 백엔드.
+/// 시스템 메시지와 사용자 메시지를 받아 응답 텍스트를 생성하는 LLM 백엔드.
+///
+/// 시스템 메시지(지시)는 `workflow`가 요청마다 만든다.
 pub trait LlmBackend {
-    fn complete(&self, prompt: &str) -> Result<String>;
+    fn complete(&self, system: &str, user: &str) -> Result<String>;
 }
 
 /// rig-rs 기반 백엔드. OpenAI 호환 엔드포인트(로컬 Ollama/vLLM, 원격 DGX 등) 또는 Claude API로
@@ -34,7 +31,6 @@ pub trait LlmBackend {
 pub struct RigBackend {
     runtime: tokio::runtime::Runtime,
     model: RigModel,
-    preamble: String,
 }
 
 /// 설정의 `Provider`에 따라 고른 rig 모델.
@@ -61,15 +57,15 @@ impl RigBackend {
         Ok(Self {
             runtime,
             model,
-            preamble: DEFAULT_PREAMBLE.to_string(),
         })
     }
 }
 
 impl LlmBackend for RigBackend {
-    fn complete(&self, prompt: &str) -> Result<String> {
+    fn complete(&self, system: &str, user: &str) -> Result<String> {
         self.runtime.block_on(async {
-            let request = CompletionRequest::new(prompt).preamble(self.preamble.as_str());
+            // rig는 preamble을 시스템 메시지로 보낸다(OpenAI 호환: 첫 system 메시지, Claude: system 필드).
+            let request = CompletionRequest::new(user).preamble(system);
             let response = match &self.model {
                 // 추론(thinking) 모델은 끄지 않으면 생각에 토큰을 소진해 본문이 빈 채로 온다(Gemma 4 확인).
                 RigModel::OpenAiCompatible(model) => {
@@ -228,7 +224,7 @@ fn anthropic_client(cfg: &Config) -> Result<Anthropic> {
 pub struct EchoBackend;
 
 impl LlmBackend for EchoBackend {
-    fn complete(&self, prompt: &str) -> Result<String> {
-        Ok(format!("[echo backend — rig 미연동]\n{prompt}"))
+    fn complete(&self, system: &str, user: &str) -> Result<String> {
+        Ok(format!("[echo backend — rig 미연동]\n{system}\n\n{user}"))
     }
 }
