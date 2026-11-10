@@ -1,7 +1,7 @@
 //! eat_hwp_raw 워크플로 오케스트레이션.
 //!
 //! 파이프라인: HWPML 파싱 → 컨텍스트+프롬프트 구성 → LLM 실행.
-//! 목표 구조(CLAUDE.md Workflow)에서는 이 단계를 `eat_hwp_server`가 맡는다.
+//! GUI 프로세스가 LLM을 직접 호출한다(별도 서버는 보류, CLAUDE.md "구조 / 산출물").
 //! (결과 입력은 후속 증분에서 연결한다.)
 
 use crate::config::Config;

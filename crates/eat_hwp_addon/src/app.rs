@@ -1,28 +1,10 @@
-#![forbid(unsafe_code)]
-//! eat_hwp_core — eat_hwp_raw의 GUI·파이프라인 라이브러리.
+//! GUI 프로세스의 진입: 설정을 읽고 GUI를 띄운다.
 //!
-//! **삭제 대상이다.** 목표 구조(CLAUDE.md "구조 / 산출물")에서 GUI는 `eat_hwp_addon`이 갖고,
-//! HWPML 파싱·프롬프트 구성·LLM 호출은 `eat_hwp_server`가 맡는다. 아래는 현재 구현의 설명이다.
-//!
-//! LLM이 문서 전체 구조와 내용을 읽고, 커서가 위치한 곳에 들어갈 글을 폰트도 맞춰서 입력하기
-//! 위한 파이프라인(config/hwp/parse/llm/workflow)과 winsafe GUI를 제공한다.
-//!
-//! 별도 실행파일은 없다. 애드온 DLL(`eat_hwp_addon`)이 HWP 프로세스 안에서 단축키/버튼으로
-//! rundll32를 spawn하고, 그 **독립 프로세스**가 [`run_gui`]를 호출해 GUI를 띄운다.
-//!
-//! 현재 구현의 흐름: GUI에 프롬프트 입력 → HWPML 컨텍스트 파싱 → rig LLM 실행 →
-//! 답변 표시 + 완료 알람.
+//! 애드온이 한글 안에서 단축키/버튼으로 rundll32를 spawn하면, 그 **독립 프로세스**가 `RunGuiW`를 거쳐
+//! [`run_gui`]를 부른다. GUI 프로세스가 문서를 읽고(hwp), LLM에 보낼 텍스트를 만들고(parse, markdown,
+//! workflow), LLM을 직접 호출한다(llm).
 
-mod chat_store;
-mod config;
-mod gui;
-mod hwp;
-mod llm;
-mod markdown;
-mod parse;
-mod settings;
-mod workflow;
-
+use crate::{chat_store, config, gui};
 use anyhow::{Result, anyhow};
 use std::path::PathBuf;
 

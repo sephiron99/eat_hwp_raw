@@ -3,7 +3,7 @@
 //! features(CLAUDE.md): "LLM Local or remote Server(nvidia spark dgx 등)를 지원".
 //! 따라서 OpenAI 호환 base URL을 기본으로 하여 로컬(Ollama/vLLM 등) 및 원격 서버를 모두 수용한다.
 //! `EAT_HWP_LLM_PROVIDER=anthropic`이면 Claude API를 쓴다. Gemini API는 추후 지원(설계만 반영).
-//! 목표 구조(CLAUDE.md)에서 LLM 설정은 서버(`eat_hwp_server`)에 둔다.
+//! LLM 설정은 클라이언트(GUI 프로세스)가 갖는다(CLAUDE.md "구조 / 산출물").
 
 /// Claude API의 기본 모델.
 const DEFAULT_CLAUDE_MODEL: &str = "claude-opus-5-5";
@@ -50,7 +50,9 @@ impl Config {
         Ok(match provider {
             Provider::OpenAiCompatible => Self {
                 llm_provider: provider,
-                llm_base_url: env_or("EAT_HWP_LLM_BASE_URL", "http://localhost:11434/v1"),
+                // localhost로 두면 IPv6(::1)부터 접속을 시도해 Ollama(IPv4만 받음)에 닿기 전에 매 연결
+                // 0.3초씩 늦어진다(로그로 확인). Ollama 기본 주소인 127.0.0.1을 쓴다.
+                llm_base_url: env_or("EAT_HWP_LLM_BASE_URL", "http://127.0.0.1:11434/v1"),
                 // 기본 모델: 실행환경(Windows, Intel 내장 그래픽, RAM 16GiB) Ollama의 Gemma 4 E4B QAT.
                 // `ollama list` 태그와 정확히 일치해야 함.
                 llm_model: env_or("EAT_HWP_LLM_MODEL", "gemma4:e4b-it-qat"),

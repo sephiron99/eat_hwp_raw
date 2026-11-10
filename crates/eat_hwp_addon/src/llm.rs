@@ -87,7 +87,7 @@ impl LlmBackend for RigBackend {
 
 /// LLM 서버 점검 결과.
 pub struct ServerStatus {
-    /// 점검한 대상. 예: `로컬 LLM 서버 http://localhost:11434/v1`, `Claude API`
+    /// 점검한 대상. 예: `로컬 LLM 서버 http://127.0.0.1:11434/v1`, `Claude API`
     pub target: String,
     pub state: ServerState,
     /// 응답(또는 실패)까지 걸린 시간(밀리초).

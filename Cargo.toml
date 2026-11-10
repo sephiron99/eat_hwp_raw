@@ -1,18 +1,13 @@
 # eat_hwp_raw — 워크스페이스 루트.
 #
-# 목표 구조(CLAUDE.md "구조 / 산출물"): 애드온(클라이언트) + 서버.
-#   - eat_hwp_addon (cdylib): HWP 애드온 셸 + 클라이언트 GUI(독립 프로세스). i686-pc-windows-msvc
-#   - eat_hwp_server        : axum REST API 서버 (아직 없음). x86_64-pc-windows-msvc
-#   - eat_hwp_core (lib)    : 삭제 대상
-#
-# 현재 코드는 이전 구조다. 산출물은 GUI 통합형 애드온 DLL **하나**다(별도 실행파일 없음):
-# 모든 크레이트는 #![forbid(unsafe_code)].
-#   - eat_hwp_core (lib)   : GUI·파이프라인
-#   - eat_hwp_addon (cdylib): HWP 애드온 셸. 한글 안에서 단축키/버튼으로 rundll32를 spawn해
-#                             eat_hwp_core::run_gui를 독립 프로세스로 띄운다.
+# 구조(CLAUDE.md "구조 / 산출물"): 애드온 + GUI(클라이언트)가 LLM을 직접 호출한다. 별도 서버는 보류.
+# 산출물은 GUI 통합형 애드온 DLL **하나**다(별도 실행파일 없음):
+# 크레이트는 eat_hwp_addon(cdylib) 하나이고 #![forbid(unsafe_code)].
+#   - 애드온: 한글 안에서 단축키/버튼으로 rundll32를 spawn해 같은 DLL의 GUI를 독립 프로세스로 띄운다.
+#   - GUI·파이프라인(문서 읽기, 프롬프트 구성, LLM 호출): 같은 크레이트의 모듈.
 #
 # 빌드: `cargo build`가 워크스페이스 전체를 빌드 → 산출물 DLL은
 #   target/i686-pc-windows-msvc/debug/eat_hwp_addon.dll
 [workspace]
 resolver = "3"
-members = ["crates/eat_hwp_core", "crates/eat_hwp_addon"]
+members = ["crates/eat_hwp_addon"]

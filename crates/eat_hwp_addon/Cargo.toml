@@ -16,13 +16,26 @@ crate-type = ["cdylib"]
 # `file-log`: hwp_automation_rs 0.3부터 라이브러리가 로그 파일을 저절로 만들지 않으므로
 # 파일 구독자(`hwp_addon::logging`)를 직접 설치한다.
 hwp_addon = { path = "../../../hwp_automation_rs/crates/hwp_addon", features = ["file-log"] }
+# 개발용 로그.
 tracing = { version = "0.1.44", default-features = false, features = ["std"] }
-# 통합 GUI. 별도 실행파일 없이 이 DLL을 rundll32가 독립 프로세스로 띄운다.
-# eat_hwp_core는 삭제 대상이다(CLAUDE.md "구조 / 산출물").
-eat_hwp_core = { path = "../eat_hwp_core" }
-
-# 자기 DLL 경로 조회(GetModuleHandle/GetModuleFileName의 safe 래퍼).
-winsafe = { version = "0.0.29", features = ["kernel"] }
+# 한글(HWP) COM 자동화. GUI 프로세스가 한글에 붙어 문서를 읽는다(CLAUDE.md Dependencies)
+hwp_com = { path = "../../../hwp_automation_rs/crates/hwp_com" }
+# GetTextFile(HWPML2X)가 돌려주는 XML 파서
+roxmltree = "0.21"
+# HWPX → Markdown 변환(사용자가 LLM에 보낼 형식으로 Markdown을 고른 경우). GPL-3.0-only.
+hwp2md = { path = "../../../hwp2md" }
+# 커서 책갈피를 표시 글로 바꾼 HWPX 사본을 만들 때 쓴다(hwp2md와 같은 zip 2.x).
+zip = { version = "2", default-features = false, features = ["deflate"] }
+# 오류 처리
+anyhow = "1"
+# LLM 백엔드 (OpenAI 호환 로컬/원격 엔드포인트, Claude API).
+# 기본 features의 rustls는 ring/aws-lc(C 코드)를 끌어와 i686-pc-windows-msvc 크로스 빌드에서
+# 실패하므로, Windows에서 schannel(순수 Rust)을 쓰는 native-tls로 교체한다.
+rig = { package = "rig-core", version = "0.44", default-features = false, features = ["derive", "reqwest", "native-tls"] }
+# rig는 async → sync LlmBackend::complete 내부에서 block_on하기 위한 런타임.
+tokio = { version = "1", features = ["rt-multi-thread"] }
+# GUI(gui)와 자기 DLL 경로 조회(kernel: GetModuleHandle/GetModuleFileName의 safe 래퍼).
+winsafe = { version = "0.0.29", features = ["gui", "kernel"] }
 
 # 단축키 키코드(VK_OEM_6 = ']').
 [dependencies.windows]

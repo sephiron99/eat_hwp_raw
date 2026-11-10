@@ -408,24 +408,15 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 name = "eat_hwp_addon"
 version = "0.1.0"
 dependencies = [
- "eat_hwp_core",
- "hwp_addon",
- "tracing",
- "windows",
- "winsafe",
-]
-
-[[package]]
-name = "eat_hwp_core"
-version = "0.1.0"
-dependencies = [
  "anyhow",
  "hwp2md",
+ "hwp_addon",
  "hwp_com",
  "rig-core",
  "roxmltree",
  "tokio",
  "tracing",
+ "windows",
  "winsafe",
  "zip",
 ]

@@ -1,14 +1,14 @@
 //! eat_hwp_raw 런처 애드온 DLL (GUI 통합형, 독립 프로세스 기동).
 //!
 //! 목표 구조(CLAUDE.md "구조 / 산출물")에서 이 크레이트는 클라이언트이고 두 부분으로 나뉜다.
+//! 별도 서버는 두지 않는다(보류).
 //! - 애드온(한글 프로세스 안): 호출되면 문서 파일을 저장하고, 현재 문서의 HWPML을 획득해 GUI
 //!   프로세스에 넘기는 역할만 한다.
-//! - GUI(독립 프로세스): HWPML을 메모리에 보관하다가 프롬프트 등과 함께 서버(`eat_hwp_server`)로
-//!   전송하고, 회신받은 HWPML 조각을 `SetTextFile`로 문서에 넣는다. 서버 지정, 프롬프트 수정,
-//!   전송·통신 상황 표시를 맡는다.
+//! - GUI(독립 프로세스): HWPML을 메모리에 보관하다가 프롬프트 등과 함께 LLM(Ollama나 Claude API)을
+//!   직접 호출하고, 넣을 글을 HWPML 조각으로 만들어 `SetTextFile`로 문서에 넣는다. LLM 서버·모델
+//!   지정, 프롬프트 수정, 전송·통신 상황 표시를 맡는다.
 //!
-//! 아래는 현재 구현의 설명이다. 현재는 GUI가 `eat_hwp_core`에 있고, GUI 프로세스가 한글에 직접
-//! 붙어 HWPML을 읽는다.
+//! 아래는 현재 구현의 설명이다. 현재는 GUI 프로세스가 한글에 직접 붙어 HWPML을 읽는다.
 //!
 //! 애드온 DLL은 한글(HWP) 프로세스 안에 로드되어 동작한다. 리본 버튼/단축키 `Ctrl+]`를 누르면
 //! **별도 실행파일 없이** 같은 DLL에 통합된 GUI를 **독립 프로세스**로 띄운다. 한글이 종료돼도
@@ -16,14 +16,26 @@
 //!
 //! 기동: `do_action`이 32비트 `rundll32.exe <self.dll>,RunGuiW` 를 자식 프로세스로 spawn한다.
 //! rundll32가 같은 DLL을 새 프로세스에 로드하고 `RunGuiW`를 호출 → 그 안에서 통합 GUI
-//! (`eat_hwp_core::run_gui`)가 실행된다. Windows는 부모(HWP) 종료 시 자식을 강제 종료하지
+//! (`app::run_gui`)가 실행된다. Windows는 부모(HWP) 종료 시 자식을 강제 종료하지
 //! 않으므로(추가로 `CREATE_BREAKAWAY_FROM_JOB` 시도) GUI는 독립적으로 유지된다.
 //!
 //! 크레이트 루트에 `#![forbid(unsafe_code)]`를 둔다. DLL export(`QueryUserActionInterface`,
 //! `RunGuiW`)는 `hwp_addon`의 `export_hwp_addon!`/`export_rundll_entry!` 매크로가 생성한다.
-//! `hwp_addon`/`eat_hwp_core`는 의존성으로만 사용한다(CLAUDE.md 경계).
+//! `hwp_addon`은 의존성으로만 사용한다(CLAUDE.md 경계). GUI와 파이프라인은 이 크레이트의 모듈이다
+//! (app, gui, hwp, parse, markdown, workflow, llm, config, settings, chat_store).
 
 #![forbid(unsafe_code)]
+
+mod app;
+mod chat_store;
+mod config;
+mod gui;
+mod hwp;
+mod llm;
+mod markdown;
+mod parse;
+mod settings;
+mod workflow;
 
 use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
@@ -127,7 +139,7 @@ impl HwpUserAction for EatHwpLauncher {
 fn run_gui_entry() {
     init_log(GUI_LOG_FILE);
     tracing::debug!("RunGuiW 진입 — 독립 프로세스에서 GUI 시작");
-    if let Err(e) = eat_hwp_core::run_gui() {
+    if let Err(e) = app::run_gui() {
         msgbox_err("eat_hwp_raw GUI", &format!("{e:?}"));
     }
 }
@@ -141,7 +153,7 @@ fn run_gui_entry() {
 /// 수준은 환경 변수 `EAT_HWP_LOG`(error, warn, info, debug, trace)로 정하고 기본은 debug다.
 /// trace면 LLM에 보내는 프롬프트 전문(문서 내용 포함)까지 남는다.
 fn init_log(file_name: &str) {
-    let path = eat_hwp_core::log_dir()
+    let path = app::log_dir()
         .map(|dir| dir.join(file_name))
         .or_else(|| logging::default_log_path().map(|p| p.with_file_name(file_name)));
     let level = std::env::var("EAT_HWP_LOG")

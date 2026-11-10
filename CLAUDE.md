@@ -2,35 +2,53 @@
 
 ## Project Overview
 LLM이 문서 전체 구조와 내용을 읽고, 커서가 위치한 곳에 들어갈 글을 폰트도 맞춰서 입력하는
-hwp addon과 서버. 사용자는 타겟과 유사한 문서들을 미리 제공하여 출력 품질을 높일 수 있음. 한글로 진행.
+hwp addon. 사용자는 타겟과 유사한 문서들을 미리 제공하여 출력 품질을 높일 수 있음. 한글로 진행.
 
 "eat_hwp_raw" 전체가 프로젝트 이름임.
 
 ## 구조 / 산출물
-애드온(클라이언트)과 서버로 나눈다. 여러 클라이언트가 한 서버를 쓸 수 있게 서버로 구성한다.
+애드온과 GUI(클라이언트)가 LLM을 직접 호출한다. LLM 쪽은 이미 서버다(로컬·LAN의 Ollama, 외부 Claude API).
+별도 서버(`eat_hwp_server`)는 두지 않는다("향후 검토" 참조).
 
-| 크레이트                | 종류                   | 타깃                     | 역할                                                                                                                                                     |
-|-------------------------|------------------------|--------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `crates/eat_hwp_addon`  | cdylib                 | `i686-pc-windows-msvc`   | HWP 애드온 셸 + 클라이언트 GUI. **별도 실행파일 없음** — 아래 두 부분이 같은 DLL에 들어 있다                                                             |
-| `crates/eat_hwp_server` | 서버 (axum + REST API) | `x86_64-pc-windows-msvc` | 클라이언트에게서 HWPML을 받아 추가하거나 수정할 글을 HWPML 조각으로 회신한다. LLM 호출과 LLM 설정을 맡고, 시스템 프롬프트 구성과 RAG 기능도 필요하다 |
+크레이트는 `crates/eat_hwp_addon`(cdylib, `i686-pc-windows-msvc`) 하나다. **별도 실행파일 없음** — 아래 두
+부분이 같은 DLL에 들어 있다. GUI·파이프라인은 이 크레이트의 모듈이다.
+
+| 모듈 | 역할 |
+|---|---|
+| `lib.rs` | 애드온 셸(툴바·단축키·`do_action`), rundll32 진입점 `RunGuiW`, 로그 설치 |
+| `app` | GUI 프로세스 진입(`run_gui`): 설정을 읽고 GUI를 띄움 |
+| `gui` | WinSafe 창(대화 칸, 프롬프트, 모델·형식·상태 줄, 시스템 프롬프트 편집 창) |
+| `hwp` | 한글에 붙어 문서 읽기(HWPML·HWPX·SaveAs) |
+| `parse`, `markdown` | HWPML 파싱·커서 표시, HWPX → Markdown(hwp2md) |
+| `workflow` | 문서 형식 선택, 시스템·사용자 메시지 구성 |
+| `llm`, `config` | rig로 LLM 호출·서버 점검, 환경 변수 설정 |
+| `settings`, `chat_store` | 사용자 설정 파일, 대화 기록 저장 |
 
 `eat_hwp_addon`의 두 부분:
-- **애드온(한글 프로세스 안)**: 단축키(`Ctrl+]`)/버튼으로 호출되면 한글에서 현재
-  문서의 HWPML을 획득해 hwp_com 프로세스(GUI 포함)를 호출하고 넘기는 역할만 한다. 호출될 때 문서 파일을 저장한다.
-- **GUI(독립 프로세스, hwp_com)**: 넘겨받은 HWPML을 메모리에 보관하다가  프롬프트 등과 함께 서버로 전송한다. 서버 지정,
-  프롬프트 수정, 전송·통신 상황 표시를 맡고, 회신받은 HWPML 조각을 `SetTextFile`로 문서에 넣는다. 독립
-  프로세스이므로 서버 응답을 기다리는 동안 한글이 멈추지 않는다.
+- **애드온(한글 프로세스 안)**: 단축키(`Ctrl+]`)/버튼으로 호출되면 한글에서 현재 문서의 HWPML을 획득해 GUI
+  프로세스를 호출하고 넘기는 역할만 한다. 호출될 때 문서 파일을 저장한다.
+- **GUI(독립 프로세스, hwp_com)**: 넘겨받은 HWPML을 메모리에 보관하다가 프롬프트 등과 함께 LLM(Ollama나
+  Claude API)에 직접 보낸다. LLM 서버·모델 지정, 프롬프트 수정, 전송·통신 상황 표시를 맡고, 넣을 글을
+  HWPML 조각으로 만들어 `SetTextFile`로 문서에 넣는다. 독립 프로세스이므로 LLM 응답을 기다리는 동안 한글이
+  멈추지 않는다.
 
 그 밖의 결정:
-- **서버의 위치**: 클라이언트와 같은 기기(로컬) 또는 동일 LAN에 두고, LLM 서버(Ollama 등)와 같은 기기에 둔다.
-- **REST API 형식**(엔드포인트, 요청/응답, 커서 위치와 프롬프트 전달, 클라이언트 인증)은 별도 문서에 작성 예정.
-- **LLM 설정**(`EAT_HWP_LLM_*`, Claude API 키)은 서버에 둔다. 사용자 지정 시스템 프롬프트만 예외로 클라이언트
-  GUI 설정에 둔다(아래 서버 Features의 "시스템 프롬프트 구성").
+- **LLM 설정**(`EAT_HWP_LLM_*`, Claude API 키, 사용자 지정 시스템 프롬프트)은 클라이언트(GUI 프로세스)가
+  환경 변수와 GUI 설정으로 갖는다.
 
-**현재 코드는 이 구조가 아니다.** 서버 구조는 문서와 주석에만 반영된 상태다. `eat_hwp_server` 크레이트는
-아직 없고 `eat_hwp_core`(GUI·파이프라인)가 남아 있다. 애드온은 rundll32로 `eat_hwp_core`의 GUI를 띄우며,
-GUI 프로세스가 한글에 직접 붙어 HWPML을 읽고 LLM을 직접 호출해 답변을 답변 칸에만 보여 준다. 아래
-Features와 Workflow는 목표 구조 기준이고, 정하지 않은 것은 "미정 사항"에 있다.
+**현재 코드와의 차이**: 애드온은 rundll32로 GUI 프로세스를 띄우기만 하고, GUI 프로세스가 한글에
+직접 붙어 문서를 읽는다(애드온이 HWPML을 넘기지 않음). 답변은 대화 칸에만 보이고 아직 문서에 넣지 않는다.
+아래 Features와 Workflow는 목표 기준이고, 정하지 않은 것은 "미정 사항"에 있다.
+
+### 향후 검토: 별도 서버(`eat_hwp_server`)
+보류. 클라이언트가 LLM을 직접 부르는 지금 구조로 충분하고, 서버는 프로세스·REST API·64비트 빌드 같은
+일만 늘린다. 아래가 실제 요구가 되면 다시 검토한다.
+- **API 키 중앙 관리**: 기관 단위로 Claude API를 쓰면서 키를 사용자 PC에 두지 않고, 사용량을 기록·제한해야 할 때
+- **본격적인 RAG**: 참고 문서를 임베딩·벡터 색인으로 한곳에서 관리·갱신해야 할 때
+- **중앙 정책 배포**: 프롬프트·규약을 클라이언트 재배포 없이 바꿔야 할 때
+
+검토했던 설계: axum REST API, `x86_64-pc-windows-msvc`, 클라이언트와 같은 기기나 동일 LAN에서 LLM 서버와 같은
+기기에 둠. 클라이언트가 HWPML·프롬프트·사용자 지정 시스템 프롬프트를 보내면 넣을 글을 HWPML 조각으로 회신.
 
 ## `crates/eat_hwp_addon` Features
 1. AI가 현재 XHwpDocument의 양식(제목, 소제목, 글꼴, 문단모양)을 이해할 수 있게 conversion한다.
@@ -38,20 +56,21 @@ Features와 Workflow는 목표 구조 기준이고, 정하지 않은 것은 "미
    양식마다 1~4개의 레벨이 존재한다)을 이해하도록 conversion한다.
 1. AI가 커서의 컨텍스트(제목/소제목/본문)를 알 수 있게 한다.
 
-## `crates/eat_hwp_server` Features
-1. LLM Local or remote Server(nvidia spark dgx 등)를 지원. LLM은 서버(`eat_hwp_server`)가 호출한다
+## LLM 연동 Features
+1. LLM Local or remote Server(nvidia spark dgx 등)를 지원. LLM은 GUI가 직접 호출한다
 1. Claude api 지원(`EAT_HWP_LLM_PROVIDER=anthropic`). Gemini api는 추후지원으로 일단 설계에만 반영
-1. 서버는 여러 클라이언트의 요청을 받는다
+1. 여러 클라이언트는 같은 LLM 서버(Ollama 등)를 함께 쓸 수 있다
 1. 시스템 프롬프트 구성. 시스템 메시지는 두 부분으로 나눈다
-   - ① 규약(역할, 답변은 넣을 본문만, 문서 형식 설명, `[[커서]]` 규칙)은 서버 코드가 갖고 사용자가 고칠 수
+   - ① 규약(역할, 답변은 넣을 본문만, 문서 형식 설명, `[[커서]]` 규칙)은 코드가 갖고 사용자가 고칠 수
      없다(바꾸면 결과를 문서에 넣는 흐름이 깨진다)
-   - ② 사용자 지정 지침(문체·분야 용어·기관 작성 규칙 등)은 클라이언트 GUI 설정으로 두고 사용자가 고친다.
-     GUI가 요청과 함께 서버로 보내고, 서버는 ① 뒤에 "이 메시지의 다른 규칙과 어긋나지 않는 범위에서
-     따른다"는 말과 함께 붙인다
+   - ② 사용자 지정 지침(문체·분야 용어·기관 작성 규칙 등)은 GUI 설정으로 두고 사용자가 고친다. ① 뒤에 "이
+     메시지의 다른 규칙과 어긋나지 않는 범위에서 따른다"는 말과 함께 붙인다
    - 사용자 메시지에는 문서 내용과 사용자 요청만 담는다
    - 현재 구현: ①은 `workflow::build_system`, 사용자 메시지는 `build_user`. ②는 GUI의 "시스템 프롬프트…"
      창에서 고치고 `%USERPROFILE%\.eat_hwp_raw\system_prompt.txt`(UTF-8)에 저장하며, 요청마다 읽어 붙인다
-1. AI서버에 미리 제공된 파일(hwp 등, 타겟과 유사한 문서, Retrieval-Augmented Generation)들에 기재된 사실/근거들을 바탕으로, 사용자가 원하는 내용을 제시한다. RAG 문서는 서버에서만 추가하며, 이 기능은 향후 과제로 미룬다.
+1. 미리 제공된 파일(hwp 등, 타겟과 유사한 문서, Retrieval-Augmented Generation)들에 기재된 사실/근거들을
+   바탕으로, 사용자가 원하는 내용을 제시한다. 향후 과제로 미룬다. 참고 문서 폴더를 GUI 설정으로 두고 LLM이
+   도구로 골라 읽게 하는 방식(hwp2md를 쓰는 내장 도구, 또는 `hwp2md-mcp` MCP 서버)을 검토했다
 1. AI가 글을 작성할 때 준수사항 / 우선순위
     1. 최대 줄 수
     1. 줄간격, 문단여백
@@ -63,20 +82,19 @@ Features와 Workflow는 목표 구조 기준이고, 정하지 않은 것은 "미
 1. 애드온은 선택범위가 있는지 먼저 확인하고 선택범위가 있으면
    1. `GetSelectedPosBySet(Method)`로 확보
    내용의 다른 이름저장(사용자 계정 전용 디렉토리의 임시 파일, 포맷은
-   HwpObject의 FileFormat::Hwpml)과 선택범위를 `eat_hwp_server`로 전달
+   HwpObject의 FileFormat::Hwpml)과 선택범위를 GUI 프로세스로 전달
 1. 애드온은 선택범위가 없다면 hwp_automation_rs의 `hwpml_with_caret`으로 현재 문서 내용(HWPML2X 문자열)과
    그 안의 커서 위치를 함께 확보. 커서 자리에 책갈피를 잠깐 넣었다가 실행 취소로 되돌리는
    방식이라 문서의 수정 상태와 다시 실행 기록이 바뀐다.
 1. 애드온이 문서 파일을 저장한다. 이후의 문서 변경 여부를 판단하는 기준점이다. 앞 단계가 문서를 수정된
    상태로 만들므로 HWPML을 확보한 뒤에 저장한다
 1. 애드온이 HWPML을 GUI 프로세스에 넘긴다. 애드온의 역할은 여기까지다
-1. GUI는 HWPML을 메모리에 보관하고, 사용자는 GUI에서 서버를 지정하고 프롬프트를 수정한다
-1. GUI가 서버의 REST API를 호출해 HWPML을 프롬프트, 사용자 지정 시스템 프롬프트 등과 함께 보내고,
-   전송·통신 상황을 보여 준다
-1. 서버는 받은 HWPML을 파싱해 문서 전체 구조와 내용을 읽고, 시스템 프롬프트(규약 + 사용자 지정)를 더해
-   LLM을 실행한다
+1. GUI는 HWPML을 메모리에 보관하고, 사용자는 GUI에서 LLM 서버·모델을 지정하고 프롬프트를 수정한다
+1. GUI가 문서를 고른 형식(평문·HWPML·Markdown)으로 바꾸고, 시스템 프롬프트(규약 + 사용자 지정)와 함께
+   LLM(Ollama나 Claude API)을 직접 호출하며, 전송·통신 상황을 보여 준다
    (미리 제공된 유사 문서를 더하는 RAG는 향후 과제)
-1. 서버는 넣을 글을 그 자리의 서식(폰트 등)에 맞춘 HWPML 조각으로 회신한다. 문서 전체를 회신하지 않는다
+1. GUI는 LLM이 쓴 글을 그 자리의 서식(폰트 등)에 맞춘 HWPML 조각으로 만든다. 문서 전체가 아니라 넣을
+   조각만 만든다(미구현)
 1. GUI가 문서 변경 여부를 파일 변경 여부 api로 판단해 조각을 `SetTextFile`로 넣는다
    - 변경이 없으면 원래 문서에 넣는다. 선택 범위가 있었으면 그 범위를 조각으로 고치고(고치는 것은 선택
      범위에 한정한다), 선택이 없었으면 애드온이 호출된 캐럿 위치에 삽입한다
@@ -85,7 +103,7 @@ Features와 Workflow는 목표 구조 기준이고, 정하지 않은 것은 "미
 ## eat_hwp_raw GUI
 GUI는 `eat_hwp_addon`에 두고 독립 프로세스로 실행한다. 구성:
 
-1. 서버 지정
+1. LLM 서버·모델 지정
 1. 프롬프트 수정
 1. 사용자 지정 시스템 프롬프트 편집(설정)
 1. 전송·통신 상황 표시
@@ -94,7 +112,7 @@ GUI는 `eat_hwp_addon`에 두고 독립 프로세스로 실행한다. 구성:
 현재문단/전체문서 선택은 두지 않고 항상 문서 전체를 보낸다(현재 구현에서도 삭제함). 처리완료 알람
 팝업과 답변 칸은 구현을 보류한다.
 
-현재 구현된 GUI는 `eat_hwp_core`(삭제 대상)에 있고 구성이 다르다. 창 크기를 조절할 수 있고(최소 크기
+현재 구현된 GUI(`gui` 모듈)는 구성이 다르다. 창 크기를 조절할 수 있고(최소 크기
 있음), 대화 칸이 창과 함께 늘고 줄며 프롬프트 줄은 아래에 붙어 움직인다.
 
 1. 대화 칸: 보낸 프롬프트와 받은 답변을 한 칸에 채팅처럼 쌓는다. `▶ 나 · 시각` / `◀ AI (모델, 걸린 시간) · 시각`
@@ -108,8 +126,7 @@ GUI는 `eat_hwp_addon`에 두고 독립 프로세스로 실행한다. 구성:
 1. 프롬프트 입력 칸과 보내기 버튼. Ctrl+Enter로도 보낸다(창의 가속기, Enter는 줄바꿈). 보내면 입력 칸을
    비운다. 처리완료 팝업은 없다
 1. Claude API 키 입력 칸(가림 표시). 키를 넣으면 Claude API로 실행하고, 비우면 환경 변수 설정대로
-   실행한다. 입력한 키는 저장하지 않으며 창을 닫으면 사라진다. LLM 설정을 서버에 두는 목표 구조에서는
-   이 칸이 클라이언트 GUI에 남지 않는다
+   실행한다. 입력한 키는 저장하지 않으며 창을 닫으면 사라진다
 1. "시스템 프롬프트…" 버튼: 사용자 지정 시스템 프롬프트를 고치는 창(여러 줄 입력, 저장/취소)을 연다.
    `%USERPROFILE%\.eat_hwp_raw\system_prompt.txt`에 저장하고, 요청마다 읽어 규약 지시 뒤에 붙인다. 비우면
    붙이지 않는다
@@ -128,13 +145,15 @@ GUI는 `eat_hwp_addon`에 두고 독립 프로세스로 실행한다. 구성:
    나갈 때 서버에 모델 목록을 요청해 점검하고(OpenAI 호환 서버는 `/models`, Claude API는 Models API) 모델
    칸 목록도 채운다. 요청이 성공하면 "작동 중"으로 바꾸고, 실패하면 다시 점검해 원인을 보인다.
    로컬/OpenAI 호환 서버에서 모델 칸의 모델과 설정의 기본 모델이 둘 다 서버 목록에 없으면 목록의 첫
-   모델을 고르고 상태 줄에 알린다(Claude API는 목록에 없는 별칭도 받으므로 바꾸지 않고 경고만 한다)
+   모델을 고르고 상태 줄에 알린다(Claude API는 목록에 없는 별칭도 받으므로 바꾸지 않고 경고만 한다).
+   로컬/OpenAI 호환 서버는 보내기 직전에도 모델 목록을 받아, 보낼 모델이 없으면 첫 모델로 바꿔 보낸다
+   (창을 연 뒤 서버가 켜진 경우 대비)
 
 ## 미정 사항
-서버 구조에서 아직 정하지 않았거나, 정한 내용끼리 맞지 않아 정리가 필요한 것들이다.
+아직 정하지 않았거나, 정한 내용끼리 맞지 않아 정리가 필요한 것들이다.
 
 1. **애드온이 GUI 프로세스에 HWPML을 넘기는 방법**: 두 프로세스 사이의 전달 수단이 정해지지 않았다.
-   임시 파일로 넘기는 방법은 유의사항의 "임시 파일을 만들지 않는다"와 맞는지 따져야 한다.
+   지금은 GUI 프로세스가 한글에 직접 붙어 읽는다(Markdown 형식은 SaveAs 임시 파일을 쓴다).
 1. **호출 시 저장**: 한 번도 저장하지 않은 새 문서는 저장할 경로가 없다. 이때의 처리와, 사용자가 원하지
    않은 시점에 문서가 저장되는 점을 어떻게 다룰지.
 1. **선택 범위**: `hwpml_with_caret`은 선택 블록이 있으면 블록의 앞쪽 끝만 돌려주고 선택을 푼다. 고칠
@@ -147,14 +166,10 @@ GUI는 `eat_hwp_addon`에 두고 독립 프로세스로 실행한다. 구성:
 1. **문단에 쓴 프롬프트**: 문단에 입력한 프롬프트를 GUI의 프롬프트 수정 칸에 어떻게 가져오는지, 결과를
    넣을 때 그 문단을 어떻게 하는지.
 1. **컨텍스트 초과**: 문서 전체를 보내는데 실행환경 LLM 구성의 컨텍스트는 8K다. 문서가 이를 넘을 때의 처리.
-1. **타깃이 둘인 워크스페이스의 빌드 설정**: `.cargo/config.toml`의 기본 타깃은 워크스페이스에 하나만
-   둘 수 있고 지금은 `i686-pc-windows-msvc`다. 서버만 `x86_64-pc-windows-msvc`로 빌드하게 하는 방법
-   (명령에 `--target` 지정, 워크스페이스 분리 등)과 WSL용 x64 링커 설정.
 
 ## Build
 Windows 전용이다. 애드온은 WinSafe/COM을 쓰고 한글 COM이 32비트이므로 타깃이 `i686-pc-windows-msvc`다
-(`.cargo/config.toml`에 기본 타깃으로 설정됨 → 아래 명령에 `--target` 불필요). 서버의 타깃은
-`x86_64-pc-windows-msvc`이며, 빌드 설정은 아직 없다("미정 사항" 참조).
+(`.cargo/config.toml`에 기본 타깃으로 설정됨 → 아래 명령에 `--target` 불필요).
 - `cargo build`: WSL에서는 [msvc-wsl-rust](https://github.com/strickczq/msvc-wsl-rust) 링커가 필요
   (`.cargo/config.toml`의 `linker` 경로를 환경에 맞게 수정).
 - `cargo check`: 링크를 하지 않으므로 링커 없이 WSL에서 타입 검증 가능.
@@ -174,22 +189,17 @@ cargo check
 debug). trace면 LLM에 보내는 프롬프트 전문(문서 내용 포함)까지 남는다. API 키는 남기지 않는다.
 
 ### unsafe policy
-워크스페이스의 모든 크레이트(`crates/eat_hwp_addon`, `crates/eat_hwp_server`, 삭제 전까지의 `crates/eat_hwp_core`) 루트에
+크레이트(`crates/eat_hwp_addon`) 루트에
 `#![forbid(unsafe_code)]` 적용. DLL export(`QueryUserActionInterface`, `RunGuiW`)는 `hwp_addon`의
 `export_hwp_addon!`/`export_rundll_entry!` 매크로로 생성하고, Win32 호출은 WinSafe의 safe 래퍼를 쓴다.
 unsafe가 필요한 기능은 이 프로젝트에 두지 않고 hwp_automation_rs에 추가하도록 제시한다.
 
 ## Dependencies
-### 서버
-1. 백엔드는 [rig-rs](https://docs.rig.rs/)
-1. 서버(`eat_hwp_server`)는 [axum](https://docs.rs/axum) 기반 REST API
-1. Windows 10 이상 전용
-1. 받은 HWPML 문자열은 [roxmltree](https://docs.rs/roxmltree)로 파싱
-
-### 클라이언트
+1. LLM 호출은 [rig-rs](https://docs.rig.rs/)
 1. Windows GUI는 [WinSafe](https://docs.rs/winsafe/latest/winsafe/gui/index.html)
 1. [hwp_automation_rs](https://github.com/sephiron99/hwp_automation_rs) 에서 hwp_com을 기반으로 작성하되, 필요할 때에는 hwp_addon도 사용한다.
-1. 문서 내용: `GetTextFile`(`GetTextFileFormat::HwpMl2X`)로 HWPML 문자열을 받는다.
+1. Windows 10 이상 전용
+1. 문서 내용: `GetTextFile`(`GetTextFileFormat::HwpMl2X`)로 HWPML 문자열을 받아 [roxmltree](https://docs.rs/roxmltree)로 파싱.
    커서 위치는 `hwp.ext_doc().hwpml_with_caret()`(`ExtDoc`)이 돌려주는 HWPML 안의 바이트 위치로 찾는다(`GetPos` 번호는 쓰지 않음)
 1. Markdown 형식: `hwp.ext_doc().hwpx_with_caret()`로 커서 책갈피가 든 임시 HWPX를 저장하고, 책갈피를
    `[[커서]]` 글자로 바꾼 사본(zip)을 [hwp2md](https://github.com/sephiron99/hwp2md)(로컬 `../hwp2md`,
@@ -229,17 +239,16 @@ identify the product this project works with.
 
 ## LLM 서버
 LLM을 돌리는 곳은 세 가지다: 개발환경의 로컬 서버, 실행환경의 로컬 서버, 외부 llm service(Claude API).
-로컬 서버는 local or intranet llm server(gemma4 or etc)다. `eat_hwp_server`는 LLM 서버와 같은 기기에 둔다.
-개발환경에서는 `eat_hwp_server`(Windows 실행파일)가 Windows에서 돌고, 같은 기기의 WSL2에 있는 Ollama에
-localhost로 닿는다.
+로컬 서버는 local or intranet llm server(gemma4 or etc)다. GUI가 직접 호출한다. 개발환경에서는 Windows의
+GUI 프로세스가 같은 기기의 WSL2에 있는 Ollama에 `127.0.0.1`로 닿는다(mirrored networking).
 
 ### LLM 연결 설정 (env)
-LLM 설정은 서버(`eat_hwp_server`)에 둔다. 현재 코드에서는 `eat_hwp_core`가 Windows 측에서 읽는다.
+GUI 프로세스(`config` 모듈)가 Windows 측 환경 변수에서 읽는다.
 
 | 환경 변수 | 기본값 | 개발환경 (WSL2 Ollama) | 실행환경 (Windows Ollama) | Claude API |
 |---|---|---|---|---|
 | `EAT_HWP_LLM_PROVIDER` | `openai` (OpenAI 호환 로컬/원격 서버) | 지정 안 함 | 지정 안 함 | `anthropic` |
-| `EAT_HWP_LLM_BASE_URL` | `http://localhost:11434/v1` | 기본값 그대로(mirrored라 그대로 닿음) | 기본값 그대로 | 지정하지 않는다(공식 주소 사용) |
+| `EAT_HWP_LLM_BASE_URL` | `http://127.0.0.1:11434/v1` | 기본값 그대로(mirrored라 그대로 닿음) | 기본값 그대로 | 지정하지 않는다(공식 주소 사용) |
 | `EAT_HWP_LLM_MODEL` | `gemma4:e4b-it-qat` (실행환경 모델) | 12B를 쓸 때만 `gemma4:12b` 지정 | 기본값 그대로. E2B 폴백 시에만 `gemma4:e2b-it-qat` 지정 | 모델 ID. 기본값 `claude-opus-5-5` |
 | `EAT_HWP_LLM_API_KEY` | 빈 값 | 빈 값(Ollama는 불필요) | 빈 값 | Claude API 키. 없으면 `ANTHROPIC_API_KEY`를 읽는다 |
 

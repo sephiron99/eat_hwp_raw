@@ -1,8 +1,7 @@
 //! winsafe 기반 GUI 셸 (CLAUDE.md "eat_hwp_raw GUI"의 현재 구현).
 //!
-//! 목표 구조에서 GUI는 `eat_hwp_addon`으로 옮기고 구성도 바뀐다(서버 지정, 프롬프트 수정,
-//! 전송·통신 상황). LLM 설정은 서버에 두므로 Claude API 키 입력 칸은 남지 않고, 답변 칸과
-//! 처리완료 알람은 구현을 보류한다.
+//! 목표 GUI 구성(CLAUDE.md "eat_hwp_raw GUI")은 LLM 서버·모델 지정, 프롬프트 수정, 사용자 지정 시스템
+//! 프롬프트 편집, 전송·통신 상황 표시다. GUI를 `eat_hwp_addon`으로 옮길지는 미정이다.
 //!
 //! 구성:
 //! - Claude API 키 입력 칸(비우면 환경 변수 설정대로 실행)
@@ -435,6 +434,8 @@ impl MainWindow {
             );
             std::thread::spawn(move || {
                 let started = Instant::now();
+                // 창을 연 뒤에 서버가 켜진 경우 등, 모델 칸에 서버에 없는 모델이 남아 있을 수 있다.
+                let cfg = preflight_model(cfg, &wnd);
                 let doc = acquire_document(format);
                 match &doc {
                     Ok(d) => tracing::info!(
@@ -520,6 +521,49 @@ fn effective_cfg(base: &Arc<Config>, api_key: &str, model: &str) -> Arc<Config> 
         cfg = cfg.with_model(model.trim());
     }
     Arc::new(cfg)
+}
+
+/// 보내기 직전(워커 스레드)에 로컬/OpenAI 호환 서버의 모델 목록을 받아, 보낼 모델이 서버에 없으면
+/// 목록의 첫 모델로 바꾼다. 상태 줄과 모델 칸도 그 결과로 갱신한다.
+///
+/// 창을 열 때 서버가 아직 꺼져 있어 점검이 실패하면 모델 칸에 설정의 기본 모델이 그대로 남는다.
+/// 그 뒤 서버가 켜졌을 때 그 모델이 서버에 없으면 "model not found"(404)로 실패하므로 여기서 막는다.
+/// Claude API는 목록에 없는 별칭도 받으므로 점검하지 않는다.
+fn preflight_model(cfg: Arc<Config>, wnd: &gui::WindowMain) -> Arc<Config> {
+    if cfg.llm_provider != Provider::OpenAiCompatible {
+        return cfg;
+    }
+    let status = llm::check_server(&cfg);
+    let mut note = None;
+    let mut chosen = Arc::clone(&cfg);
+    if let ServerState::Working(models) = &status.state
+        && !models.iter().any(|m| *m == cfg.llm_model)
+        && let Some(first) = models.first()
+    {
+        tracing::warn!(missing = %cfg.llm_model, picked = %first, "보낼 모델이 서버에 없어 바꿈");
+        note = Some(format!(" · 모델 {}이(가) 서버에 없어 {first}(으)로 보냄", cfg.llm_model));
+        chosen = Arc::new(cfg.with_model(first));
+    }
+    let default_model = chosen.llm_model.clone();
+    let provider = chosen.llm_provider;
+    wnd.run_ui_thread(move || {
+        show_status(status, &default_model, provider);
+        if let Some(note) = note {
+            append_status(&note);
+        }
+        Ok(())
+    });
+    chosen
+}
+
+/// 상태 줄 끝에 글을 덧붙인다(UI 스레드).
+fn append_status(text: &str) {
+    SERVER_UI.with_borrow(|ui| {
+        if let Some((_, lbl)) = ui {
+            let current = lbl.hwnd().GetWindowText().unwrap_or_default();
+            let _ = lbl.hwnd().SetWindowText(&format!("{current}{text}"));
+        }
+    });
 }
 
 /// 워커 스레드에서 서버를 점검하고, UI 스레드에서 상태 줄과 모델 칸을 채운다.
