@@ -1,4 +1,4 @@
-//! 한글(HWP) 연동: `hwp_com` OLE 클라이언트로 현재 문서 내용(HWPML)과 커서 위치 확보.
+//! 한글(HWP) 연동: `hwp_com` OLE 클라이언트로 현재 문서 내용(HWPML)과 커서 위치 확보, LLM이 쓴 글 넣기.
 //!
 //! 목표 구조(CLAUDE.md)에서는 한글 안의 애드온이 HWPML을 획득해 GUI 프로세스에 넘긴다.
 //! 현재 구현: addon이 GUI 프로세스를 띄우므로 한글은 이미 실행 중 →
@@ -10,6 +10,7 @@
 //! - 문서 내용은 `GetTextFile`(HWPML2X)로 읽는다. 파일로 저장하지 않는다.
 
 use anyhow::{Result, anyhow, bail};
+use hwp_com::ext::CharShape;
 use hwp_com::method::hwp_object::{FileFormat, GetTextFileFormat};
 use hwp_com::{HwpClient, HwpObject};
 
@@ -19,6 +20,17 @@ pub struct DocSnapshot {
     pub content: DocContent,
     /// 문서 파일 경로. 한 번도 저장하지 않은 문서는 빈 문자열. 대화 기록을 문서별로 나누는 데 쓴다.
     pub path: String,
+    /// 읽은 문서. LLM이 쓴 글은 이 문서에만 넣는다. 한글에서 읽지 않았으면(`EAT_HWP_DOC`) `None`.
+    pub origin: Option<DocIdentity>,
+}
+
+/// 한글에 열린 문서 하나를 가리키는 값. 문서 ID(`DocumentID`)와 전체 경로(`FullName`)가 모두 같아야
+/// 같은 문서로 본다. 문서를 닫은 뒤 새로 연 문서가 같은 ID를 받는 경우를 경로로 한 번 더 거른다.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DocIdentity {
+    pub id: i32,
+    /// 저장하지 않은 문서는 빈 문자열일 수 있다.
+    pub full_name: String,
 }
 
 /// 문서 내용. LLM에 보낼 형식에 따라 읽는 방법이 다르다.
@@ -33,6 +45,70 @@ pub enum DocContent {
 /// 실행 중인 한글 인스턴스에 연결한다.
 pub fn connect() -> Result<HwpObject> {
     HwpClient::attach().map_err(|e| anyhow!("실행 중인 한글에 연결 실패: {e}"))
+}
+
+/// 지금 활성 문서(`XHwpDocuments.Active_XHwpDocument`).
+pub fn active_document(hwp: &HwpObject) -> Result<DocIdentity> {
+    let doc = hwp
+        .documents()
+        .and_then(|docs| docs.active())
+        .map_err(|e| anyhow!("활성 문서를 얻지 못함: {e}"))?;
+    identity(&doc)
+}
+
+fn identity(doc: &hwp_com::method::xhwp::XHwpDocument) -> Result<DocIdentity> {
+    Ok(DocIdentity {
+        id: doc
+            .document_id()
+            .map_err(|e| anyhow!("문서 ID를 얻지 못함: {e}"))?,
+        full_name: doc.full_name().unwrap_or_default(),
+    })
+}
+
+/// 원래 문서(`origin`)의 커서 자리에 `text`를 넣는다. 원래 문서가 아닌 곳에는 넣지 않는다.
+///
+/// 원래 문서가 활성 문서가 아니면(응답을 기다리는 사이 다른 탭으로 간 경우) 원래 문서를 찾아
+/// 활성화한 뒤 넣는다. 그 문서의 커서 자리에 들어간다. 원래 문서를 찾지 못하거나(닫힘, 다른 이름으로
+/// 저장해 경로가 바뀜) 활성화하지 못하면 넣지 않고 오류를 돌려준다. 활성 문서를 바꿨으면 `true`.
+pub fn insert_into(hwp: &HwpObject, origin: &DocIdentity, text: &str) -> Result<bool> {
+    if active_document(hwp)? == *origin {
+        insert_text(hwp, text)?;
+        return Ok(false);
+    }
+    let doc = hwp
+        .documents()
+        .and_then(|docs| docs.find_item(origin.id))
+        .map_err(|e| anyhow!("원래 문서를 찾지 못함(닫혔을 수 있음): {e}"))?;
+    let found = identity(&doc)?;
+    if found != *origin {
+        bail!(
+            "원래 문서를 찾지 못함: 읽을 때 {:?}(ID {}), 지금 그 ID는 {:?}",
+            origin.full_name,
+            origin.id,
+            found.full_name
+        );
+    }
+    doc.set_active()
+        .map_err(|e| anyhow!("원래 문서를 활성화하지 못함: {e}"))?;
+    // 활성화가 실제로 됐는지 넣기 직전에 다시 확인한다.
+    let active = active_document(hwp)?;
+    if active != *origin {
+        bail!("원래 문서를 활성화하지 못함: 활성 문서가 {:?}", active.full_name);
+    }
+    insert_text(hwp, text)?;
+    Ok(true)
+}
+
+/// 지금 커서 자리에 `text`를 넣는다(`ExtText::insert_with_shape`). 선택 블록이 있으면 블록을 지우고
+/// 그 자리에 넣는다.
+///
+/// 글자 모양은 아직 정하지 않는다. 모든 항목이 `None`인 `CharShape`를 넘겨 커서 자리의 모양을 그대로
+/// 따른다. 줄바꿈은 `\r\n`으로 맞춘다.
+pub fn insert_text(hwp: &HwpObject, text: &str) -> Result<()> {
+    let text = text.replace("\r\n", "\n").replace('\n', "\r\n");
+    hwp.ext_text()
+        .insert_with_shape(&text, &CharShape::default())
+        .map_err(|e| anyhow!("문서에 글 넣기 실패: {e}"))
 }
 
 /// 현재 문서 전체의 HWPML과 커서 위치를 읽는다. (`ExtDoc::hwpml_with_caret`)
@@ -56,6 +132,7 @@ pub fn document_snapshot(hwp: &HwpObject) -> Result<DocSnapshot> {
             caret: Some(caret.offset),
         },
         path: hwp.path().unwrap_or_default(),
+        origin: None,
     })
 }
 
@@ -96,6 +173,7 @@ pub fn document_hwpml_file(hwp: &HwpObject) -> Result<DocSnapshot> {
     Ok(DocSnapshot {
         content: DocContent::Hwpml { hwpml, caret: None },
         path: hwp.path().unwrap_or_default(),
+        origin: None,
     })
 }
 
@@ -135,6 +213,7 @@ pub fn document_markdown(hwp: &HwpObject) -> Result<DocSnapshot> {
     Ok(DocSnapshot {
         content: DocContent::Markdown(md),
         path: hwp.path().unwrap_or_default(),
+        origin: None,
     })
 }
 

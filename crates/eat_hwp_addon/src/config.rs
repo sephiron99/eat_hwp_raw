@@ -79,6 +79,18 @@ impl Config {
         }
     }
 
+    /// 로컬/OpenAI 호환 서버 주소만 바꾼 설정을 만든다. (GUI 설정 창의 서버 주소 칸)
+    /// Claude API 설정이면 바꾸지 않는다(공식 주소를 쓴다).
+    pub fn with_base_url(&self, base_url: &str) -> Self {
+        match self.llm_provider {
+            Provider::OpenAiCompatible => Self {
+                llm_base_url: base_url.to_string(),
+                ..self.clone()
+            },
+            Provider::Anthropic => self.clone(),
+        }
+    }
+
     /// GUI에 입력한 Claude API 키로 Claude API를 쓰는 설정을 만든다.
     ///
     /// 환경 변수 설정이 이미 Claude API이면 모델과 주소는 그대로 두고 키만 바꾼다. 로컬 서버

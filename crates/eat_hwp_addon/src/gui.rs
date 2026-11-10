@@ -1,18 +1,13 @@
 //! winsafe 기반 GUI 셸 (CLAUDE.md "eat_hwp_raw GUI"의 현재 구현).
 //!
 //! 목표 GUI 구성(CLAUDE.md "eat_hwp_raw GUI")은 LLM 서버·모델 지정, 프롬프트 수정, 사용자 지정 시스템
-//! 프롬프트 편집, 전송·통신 상황 표시다. GUI를 `eat_hwp_addon`으로 옮길지는 미정이다.
+//! 프롬프트 편집, 전송·통신 상황 표시다.
 //!
-//! 구성:
-//! - Claude API 키 입력 칸(비우면 환경 변수 설정대로 실행)
-//! - 모델 칸: 백엔드가 제공하는 모델 목록에서 고르거나 직접 입력
-//! - "시스템 프롬프트…" 버튼: 사용자 지정 시스템 프롬프트(`settings`의 `system_prompt.txt`)를 고치는
-//!   창을 연다. 규약 지시 뒤에 붙는다
-//! - 문서 형식 칸: LLM에 보낼 문서 텍스트의 형식(평문 / HWPML 원문 / HWPX→Markdown /
-//!   SaveAs HWPML 파일)을 고른다
-//! - LLM 상태 줄: 지금 설정(키 칸 포함)이 가리키는 서버가 작동하는지 보인다. 창을 열 때, "상태 확인"을
-//!   누를 때, 키 칸에서 나갈 때 서버에 모델 목록을 요청해 점검하고(모델 칸 목록도 이때 채운다),
-//!   요청이 성공하면 "작동 중"으로, 실패하면 다시 점검해 원인(연결 안 됨, 인증 실패 등)을 보인다
+//! 메인 창:
+//! - LLM 상태 줄: 지금 설정이 가리키는 서버가 작동하는지 보인다. 창을 열 때, 설정 창에서 키나 모델을
+//!   바꿨을 때 서버에 모델 목록을 요청해 점검하고, 요청이 성공하면 "작동 중"으로, 실패하면 다시
+//!   점검해 원인(연결 안 됨, 인증 실패 등)을 보인다
+//! - 설정 요약 줄(모델, 보낼 문서 형식, 키 입력 여부)과 "설정…" 버튼
 //! - 대화 칸(read-only multiline Edit): 보낸 프롬프트와 받은 답변을 채팅처럼 차례로 쌓는다
 //!   - `▶ 나 · 시각` / `◀ AI (모델, 걸린 시간) · 시각` 머리줄로 말한 쪽과 그 글이 대화 칸에 나온
 //!     시각(시스템 로컬 시간, 초 단위)을 보이고, 한 차례가 끝날 때마다
@@ -21,11 +16,27 @@
 //!   - 각 요청은 독립이다. 이전 대화는 LLM에 보내지 않는다
 //!   - 대화는 문서와 API 종류(로컬/OpenAI 호환, Claude)마다 `chat_store`가 정한 파일에 저장되고,
 //!     같은 문서·API로 돌아오면 다시 불러온다. 창을 열 때 한글의 현재 문서를, 요청을 보낼 때 읽은
-//!     문서를, 상태를 점검할 때 그 설정의 API 종류를 기준으로 바꾼다
+//!     문서를, 메인 창의 상태를 점검할 때 그 설정의 API 종류를 기준으로 바꾼다
 //! - 프롬프트 입력 칸 + 보내기 버튼(Ctrl+Enter로도 보낸다). 보내면 입력 칸을 비운다. 처리완료
 //!   팝업은 없다
+//! - "커서 위치에 삽입" 버튼: 마지막으로 받은 답을 원래 문서(요청 때 읽은 문서)의 커서 자리에 넣고,
+//!   넣었는지를 대화 칸에 한 줄로 적는다. 받은 답이 없거나 요청·넣기 중에는 꺼진다
 //!
-//! LLM에는 항상 문서 전체를 커서 위치 표시와 함께 보낸다.
+//! 설정 창("설정…" 버튼, 모달):
+//! - Claude API 키 칸(비우면 환경 변수 설정대로 실행, 저장하지 않음)
+//! - 로컬/OpenAI 호환 서버 주소 칸(비우면 `EAT_HWP_LLM_BASE_URL` 설정)
+//! - 모델 칸(목록에서 고르거나 직접 입력)과 "상태 확인" 버튼, 상태 줄. 상태 확인과 키·주소 칸에서 나갈
+//!   때의 점검은 설정 창 안에서만 보이고, "확인"을 눌러야 메인 창에 적용된다
+//! - LLM에 보낼 문서 형식(평문 / HWPML 원문 / HWPX→Markdown / SaveAs HWPML 파일)
+//! - 고정 프롬프트(코드가 정한 규약, 읽기 전용, 고른 형식 기준)와 사용자 지정 지침 칸
+//!   (`settings`의 `system_prompt.txt`)
+//! - "확인"은 사용자 지정 지침과 서버 주소·모델·형식(`settings`의 `settings.txt`)을 파일에 쓰고 적용한다.
+//!   키는 저장하지 않고 이번 실행에만 쓴다. "취소"는 바꾼 값을 버린다
+//!
+//! 창을 열 때 `settings.txt`의 서버 주소·모델·형식을 읽어 적용한다.
+//!
+//! LLM에는 항상 문서 전체를 커서 위치 표시와 함께 보낸다. 답은 받기만 하고, 문서에는 "커서 위치에
+//! 삽입" 버튼을 눌러야 넣는다(`hwp::insert_into`).
 //!
 //! 문서 내용은 `hwp` 모듈이 실행 중인 한글에서 `GetTextFile`(HWPML2X)로 읽어 온다. 한글 없이
 //! 테스트할 때는 환경변수 `EAT_HWP_DOC`에 HWPML 파일(UTF-8) 경로를 지정하면 그 파일을 사용한다.
@@ -33,12 +44,13 @@
 use crate::chat_store;
 use crate::config::{Config, Provider};
 use crate::hwp::{self, DocContent, DocSnapshot};
+use crate::llm::{self, LlmBackend, RigBackend, ServerState, ServerStatus};
 use crate::markdown;
 use crate::settings;
-use crate::llm::{self, LlmBackend, RigBackend, ServerState, ServerStatus};
 use crate::workflow::{self, DocFormat};
 use anyhow::{Result, anyhow};
 use std::cell::RefCell;
+use std::rc::Rc;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -56,12 +68,71 @@ const ID_ACCEL_SEND: u16 = 2001;
 const TURN_SEPARATOR: &str = "────────────────────────────";
 
 thread_local! {
-    /// 모델 콤보박스와 LLM 상태 줄. winsafe 컨트롤은 스레드를 못 넘기므로, 서버를 점검한 워커가
-    /// `run_ui_thread`로 UI 스레드에 돌아온 뒤 여기서 꺼내 쓴다. UI 스레드에서만 채워진다.
-    static SERVER_UI: RefCell<Option<(gui::ComboBox, gui::Label)>> = const { RefCell::new(None) };
+    /// 메인 창의 상태 줄·요약 줄, 적용된 설정, 열려 있는 설정 창의 컨트롤. winsafe 컨트롤은 스레드를
+    /// 못 넘기므로, 서버를 점검한 워커가 `run_ui_thread`로 UI 스레드에 돌아온 뒤 여기서 꺼내 쓴다.
+    /// UI 스레드에서만 쓴다.
+    static UI: RefCell<Option<Ui>> = const { RefCell::new(None) };
 
     /// 대화 칸과, 응답 대기 줄이 시작하는 위치(UTF-16 글자 수). UI 스레드에서만 쓴다.
     static CHAT: RefCell<Option<Chat>> = const { RefCell::new(None) };
+}
+
+struct Ui {
+    /// 환경 변수에서 읽은 설정. 설정 창의 키·서버 주소·모델을 여기에 덮어써 쓴다.
+    base: Arc<Config>,
+    /// 메인 창의 LLM 상태 줄.
+    status: gui::Label,
+    /// 메인 창의 설정 요약 줄.
+    summary: gui::Label,
+    session: Session,
+    /// 열려 있는 설정 창의 컨트롤. 닫혀 있으면 `None`.
+    settings: Option<SettingsUi>,
+    /// "커서 위치에 삽입" 버튼.
+    btn_insert: gui::Button,
+    /// 마지막으로 받은 답. 보내기를 누르면 비운다.
+    answer: Option<Answer>,
+}
+
+/// "커서 위치에 삽입"으로 넣을 답.
+#[derive(Clone)]
+struct Answer {
+    text: String,
+    /// 요청 때 읽은 문서. 이 문서에만 넣는다.
+    origin: Option<hwp::DocIdentity>,
+}
+
+/// 설정 창에서 적용한 값. 키를 뺀 나머지는 `settings.txt`에 저장한다.
+#[derive(Clone)]
+struct Session {
+    /// Claude API 키. 비우면 환경 변수 설정대로 실행한다. 저장하지 않는다.
+    api_key: String,
+    /// 로컬/OpenAI 호환 서버 주소. 비우면 `EAT_HWP_LLM_BASE_URL` 설정대로 실행한다.
+    base_url: String,
+    /// 모델. 비우면 `EAT_HWP_LLM_MODEL` 설정대로 실행한다.
+    model: String,
+    format: DocFormat,
+    /// 메인 창의 마지막 점검에서 받은 모델 목록. 설정 창의 모델 칸 목록으로 쓴다.
+    models: Vec<String>,
+}
+
+/// 설정 창에서 점검 결과를 보일 컨트롤.
+struct SettingsUi {
+    cmb_model: gui::ComboBox,
+    lbl_status: gui::Label,
+}
+
+/// 서버 점검 결과를 보일 곳.
+#[derive(Clone, Copy, Debug)]
+enum Target {
+    /// 메인 창: 적용된 설정의 상태. 모델을 고르고 대화의 API 종류를 바꾼다.
+    Main,
+    /// 설정 창: 아직 적용하지 않은 키·모델의 상태. 설정 창의 모델 칸만 채운다.
+    Settings,
+}
+
+/// `UI`를 빌려 `f`를 부른다(UI 스레드). 아직 없으면 `None`.
+fn with_ui<R>(f: impl FnOnce(&mut Ui) -> R) -> Option<R> {
+    UI.with_borrow_mut(|ui| ui.as_mut().map(f))
 }
 
 struct Chat {
@@ -75,7 +146,7 @@ struct Chat {
     file: Option<PathBuf>,
 }
 
-/// 메인 윈도우와 컨트롤, 공유 상태(설정)를 보유한다.
+/// 메인 윈도우와 컨트롤을 보유한다. 설정과 상태 줄은 `UI`에 둔다.
 pub struct MainWindow {
     wnd: gui::WindowMain,
     // 라벨은 컨트롤 수명 유지를 위해 보유만 한다(읽지 않음).
@@ -87,20 +158,11 @@ pub struct MainWindow {
     lbl_chat: gui::Label,
     txt_chat: gui::Edit,
     #[allow(dead_code)]
-    lbl_api_key: gui::Label,
-    txt_api_key: gui::Edit,
-    #[allow(dead_code)]
-    lbl_model: gui::Label,
-    cmb_model: gui::ComboBox,
-    #[allow(dead_code)]
-    lbl_format: gui::Label,
-    cmb_format: gui::ComboBox,
-    btn_system: gui::Button,
-    btn_models: gui::Button,
-    #[allow(dead_code)]
     lbl_status: gui::Label,
-    // 워커 스레드로 넘기기 위해 Arc(Send+Sync).
-    cfg: Arc<Config>,
+    #[allow(dead_code)]
+    lbl_summary: gui::Label,
+    btn_settings: gui::Button,
+    btn_insert: gui::Button,
 }
 
 impl MainWindow {
@@ -145,7 +207,7 @@ impl MainWindow {
             gui::EditOpts {
                 position: gui::dpi(10, 404),
                 resize_behavior: (gui::Horz::Resize, gui::Vert::Repos),
-                width: gui::dpi_x(400),
+                width: gui::dpi_x(380),
                 height: gui::dpi_y(70),
                 control_style: co::ES::MULTILINE
                     | co::ES::WANTRETURN
@@ -158,10 +220,20 @@ impl MainWindow {
             &wnd,
             gui::ButtonOpts {
                 text: "보내기",
-                position: gui::dpi(420, 404),
+                position: gui::dpi(400, 404),
                 resize_behavior: (gui::Horz::Repos, gui::Vert::Repos),
-                width: gui::dpi_x(90),
+                width: gui::dpi_x(110),
                 ctrl_id: ID_BTN_RUN,
+                ..Default::default()
+            },
+        );
+        let btn_insert = gui::Button::new(
+            &wnd,
+            gui::ButtonOpts {
+                text: "커서 위치에 삽입",
+                position: gui::dpi(400, 436),
+                resize_behavior: (gui::Horz::Repos, gui::Vert::Repos),
+                width: gui::dpi_x(110),
                 ..Default::default()
             },
         );
@@ -169,17 +241,17 @@ impl MainWindow {
             &wnd,
             gui::LabelOpts {
                 text: "대화",
-                position: gui::dpi(10, 156),
+                position: gui::dpi(10, 58),
                 ..Default::default()
             },
         );
         let txt_chat = gui::Edit::new(
             &wnd,
             gui::EditOpts {
-                position: gui::dpi(10, 174),
+                position: gui::dpi(10, 76),
                 resize_behavior: (gui::Horz::Resize, gui::Vert::Resize),
                 width: gui::dpi_x(500),
-                height: gui::dpi_y(202),
+                height: gui::dpi_y(300),
                 control_style: co::ES::MULTILINE
                     | co::ES::AUTOVSCROLL
                     | co::ES::NOHIDESEL
@@ -202,100 +274,63 @@ impl MainWindow {
             })
         });
         // 맨 위에 놓이지만 마지막에 만들어, 창을 열면 프롬프트 칸이 먼저 포커스를 받게 한다.
-        let lbl_api_key = gui::Label::new(
-            &wnd,
-            gui::LabelOpts {
-                text: "Claude API 키 (비우면 환경 변수 설정 사용)",
-                position: gui::dpi(10, 8),
-                ..Default::default()
-            },
-        );
-        let txt_api_key = gui::Edit::new(
-            &wnd,
-            gui::EditOpts {
-                position: gui::dpi(10, 26),
-                resize_behavior: (gui::Horz::Resize, gui::Vert::None),
-                width: gui::dpi_x(500),
-                control_style: co::ES::AUTOHSCROLL | co::ES::PASSWORD,
-                ..Default::default()
-            },
-        );
-        let lbl_model = gui::Label::new(
-            &wnd,
-            gui::LabelOpts {
-                text: "모델 (목록에서 고르거나 직접 입력)",
-                position: gui::dpi(10, 58),
-                resize_behavior: (gui::Horz::Resize, gui::Vert::None),
-                // 나중에 더 긴 상태 문구로 바뀌므로 글자 길이에 맞추지 않고 폭을 고정한다.
-                size: gui::dpi(500, 16),
-                ..Default::default()
-            },
-        );
-        let cmb_model = gui::ComboBox::new(
-            &wnd,
-            gui::ComboBoxOpts {
-                position: gui::dpi(10, 76),
-                resize_behavior: (gui::Horz::Resize, gui::Vert::None),
-                width: gui::dpi_x(380),
-                // 목록에 없는 모델 이름도 직접 입력할 수 있게 편집형으로 둔다.
-                control_style: co::CBS::DROPDOWN,
-                ..Default::default()
-            },
-        );
-        let btn_models = gui::Button::new(
-            &wnd,
-            gui::ButtonOpts {
-                text: "상태 확인",
-                position: gui::dpi(400, 75),
-                resize_behavior: (gui::Horz::Repos, gui::Vert::None),
-                width: gui::dpi_x(110),
-                ..Default::default()
-            },
-        );
         let lbl_status = gui::Label::new(
             &wnd,
             gui::LabelOpts {
                 text: "LLM 상태: 확인 전",
-                position: gui::dpi(10, 104),
+                position: gui::dpi(10, 8),
                 resize_behavior: (gui::Horz::Resize, gui::Vert::None),
-                // 상태 문구가 바뀌어 길어지므로 폭을 고정한다.
+                // 상태 문구가 바뀌어 길어지므로 글자 길이에 맞추지 않고 폭을 고정한다.
                 size: gui::dpi(500, 16),
                 ..Default::default()
             },
         );
-        let lbl_format = gui::Label::new(
+        let lbl_summary = gui::Label::new(
             &wnd,
             gui::LabelOpts {
-                text: "LLM에 보낼 문서",
-                position: gui::dpi(10, 130),
+                text: "",
+                position: gui::dpi(10, 33),
+                resize_behavior: (gui::Horz::Resize, gui::Vert::None),
+                size: gui::dpi(400, 16),
                 ..Default::default()
             },
         );
-        let format_labels: Vec<&str> = DocFormat::ALL.iter().map(|f| f.label()).collect();
-        let cmb_format = gui::ComboBox::new(
-            &wnd,
-            gui::ComboBoxOpts {
-                position: gui::dpi(120, 126),
-                width: gui::dpi_x(260),
-                items: &format_labels,
-                selected_item: DocFormat::ALL
-                    .iter()
-                    .position(|f| *f == DocFormat::DEFAULT)
-                    .map(|i| i as u32),
-                ..Default::default()
-            },
-        );
-        let btn_system = gui::Button::new(
+        let btn_settings = gui::Button::new(
             &wnd,
             gui::ButtonOpts {
-                text: "시스템 프롬프트…",
-                position: gui::dpi(390, 125),
-                width: gui::dpi_x(120),
+                text: "설정…",
+                position: gui::dpi(420, 28),
                 resize_behavior: (gui::Horz::Repos, gui::Vert::None),
+                width: gui::dpi_x(90),
                 ..Default::default()
             },
         );
-        SERVER_UI.with_borrow_mut(|ui| *ui = Some((cmb_model.clone(), lbl_status.clone())));
+
+        let cfg = Arc::new(cfg);
+        let saved = settings::load_gui_settings();
+        tracing::info!(
+            base_url = %saved.base_url,
+            model = %saved.model,
+            format = ?saved.format,
+            "GUI 설정 읽음"
+        );
+        UI.with_borrow_mut(|ui| {
+            *ui = Some(Ui {
+                base: Arc::clone(&cfg),
+                status: lbl_status.clone(),
+                summary: lbl_summary.clone(),
+                session: Session {
+                    api_key: String::new(),
+                    base_url: saved.base_url,
+                    model: saved.model,
+                    format: saved.format.unwrap_or(DocFormat::DEFAULT),
+                    models: Vec::new(),
+                },
+                settings: None,
+                btn_insert: btn_insert.clone(),
+                answer: None,
+            })
+        });
 
         let new_self = Self {
             wnd,
@@ -304,16 +339,10 @@ impl MainWindow {
             btn_run,
             lbl_chat,
             txt_chat,
-            lbl_api_key,
-            txt_api_key,
-            lbl_model,
-            cmb_model,
-            lbl_format,
-            cmb_format,
-            btn_system,
-            btn_models,
             lbl_status,
-            cfg: Arc::new(cfg),
+            lbl_summary,
+            btn_settings,
+            btn_insert,
         };
         new_self.events();
         new_self
@@ -328,67 +357,70 @@ impl MainWindow {
         let wnd = self.wnd.clone();
         let txt_prompt = self.txt_prompt.clone();
         let btn_run = self.btn_run.clone();
-        let txt_api_key = self.txt_api_key.clone();
-        let cmb_model = self.cmb_model.clone();
-        let cmb_format = self.cmb_format.clone();
-        let cfg = Arc::clone(&self.cfg);
 
-        // 창이 만들어지면 모델 칸에 설정의 모델을 넣고 목록을 받아 온다.
+        // 창이 만들어지면 요약 줄을 채우고 서버를 점검한다(모델 목록도 이때 받는다).
         {
             let wnd2 = wnd.clone();
-            let cmb_model = self.cmb_model.clone();
             let txt_chat = self.txt_chat.clone();
-            let cfg = Arc::clone(&self.cfg);
             self.wnd.on().wm_create(move |_| {
                 // 여러 차례 쌓여도 잘리지 않게 글자 수 제한을 최대로 둔다(기본은 약 3만 자).
                 txt_chat.limit_text(None);
-                let _ = cmb_model.hwnd().SetWindowText(&cfg.llm_model);
-                check_server(&wnd2, Arc::clone(&cfg));
+                if let Some(cfg) = with_ui(|ui| {
+                    ui.btn_insert.hwnd().EnableWindow(false);
+                    update_summary(ui);
+                    check_cfg(ui)
+                }) {
+                    check_server(&wnd2, cfg, Target::Main);
+                }
                 load_current_document_chat(&wnd2);
                 Ok(0)
             });
         }
 
-        // 상태 확인: 키 칸의 값까지 반영한 설정으로 서버를 점검한다(키를 넣으면 Claude API).
-        {
-            let wnd2 = wnd.clone();
-            let txt_api_key = self.txt_api_key.clone();
-            let cfg = Arc::clone(&self.cfg);
-            self.btn_models.on().bn_clicked(move || {
-                let key = txt_api_key.text().unwrap_or_default();
-                check_server(&wnd2, effective_cfg(&cfg, &key, ""));
-                Ok(())
-            });
-        }
-
-        // 키 칸에서 나가면 바뀐 키로 다시 점검한다. 같은 키면 다시 묻지 않는다.
-        {
-            let wnd2 = wnd.clone();
-            let txt_api_key = self.txt_api_key.clone();
-            let cfg = Arc::clone(&self.cfg);
-            let last_key = RefCell::new(String::new());
-            self.txt_api_key.on().en_kill_focus(move || {
-                let key = txt_api_key.text().unwrap_or_default();
-                if *last_key.borrow() != key {
-                    *last_key.borrow_mut() = key.clone();
-                    check_server(&wnd2, effective_cfg(&cfg, &key, ""));
-                }
-                Ok(())
-            });
-        }
-
         // 창을 너무 작게 줄여 컨트롤이 겹치지 않게 최소 크기를 둔다(창 테두리 포함 크기).
         self.wnd.on().wm_get_min_max_info(|p| {
-            let (w, h) = gui::dpi(440, 440);
+            let (w, h) = gui::dpi(440, 400);
             p.info.ptMinTrackSize = winsafe::POINT::with(w, h);
             Ok(())
         });
 
-        // 사용자 지정 시스템 프롬프트 편집 창.
+        // 설정 창.
         {
             let wnd2 = wnd.clone();
-            self.btn_system.on().bn_clicked(move || {
-                edit_custom_system_prompt(&wnd2);
+            self.btn_settings.on().bn_clicked(move || {
+                open_settings(&wnd2);
+                Ok(())
+            });
+        }
+
+        // 커서 위치에 삽입: 마지막 답을 원래 문서의 커서 자리에 넣는다. COM 호출이라 워커 스레드에서
+        // 하고, 그동안 보내기와 삽입을 막는다.
+        {
+            let wnd2 = wnd.clone();
+            let btn_run = self.btn_run.clone();
+            let btn_insert = self.btn_insert.clone();
+            self.btn_insert.on().bn_clicked(move || {
+                let Some(answer) = with_ui(|ui| ui.answer.clone()).flatten() else {
+                    return Ok(());
+                };
+                btn_insert.hwnd().EnableWindow(false);
+                btn_run.hwnd().EnableWindow(false);
+                let wnd = wnd2.clone();
+                std::thread::spawn(move || {
+                    let note = insert_answer(&answer.text, answer.origin.as_ref());
+                    let wnd_ui = wnd.clone();
+                    wnd.run_ui_thread(move || {
+                        if let Ok(btn) = wnd_ui.hwnd().GetDlgItem(ID_BTN_RUN) {
+                            btn.EnableWindow(true);
+                        }
+                        with_ui(|ui| {
+                            ui.btn_insert.hwnd().EnableWindow(ui.answer.is_some());
+                        });
+                        chat_note(&note);
+                        chat_save();
+                        Ok(())
+                    });
+                });
                 Ok(())
             });
         }
@@ -406,21 +438,21 @@ impl MainWindow {
 
         self.btn_run.on().bn_clicked(move || {
             let user_prompt = txt_prompt.text().unwrap_or_default();
-            let format = cmb_format
-                .items()
-                .selected_index()
-                .and_then(|i| DocFormat::ALL.get(i as usize).copied())
-                .unwrap_or(DocFormat::DEFAULT);
-            // 키를 입력했으면 Claude API로, 비웠으면 환경 변수 설정대로 실행한다.
-            // 모델 칸이 비어 있지 않으면 그 모델을 쓴다.
-            let api_key = txt_api_key.text().unwrap_or_default();
-            let model = cmb_model.hwnd().GetWindowText().unwrap_or_default();
-            let cfg = effective_cfg(&cfg, &api_key, &model);
+            // 설정 창에서 키를 입력했으면 Claude API로, 비웠으면 환경 변수 설정대로 실행한다.
+            // 모델이 비어 있지 않으면 그 모델을 쓴다.
+            let Some((cfg, format)) = with_ui(|ui| (session_cfg(ui), ui.session.format)) else {
+                return Ok(());
+            };
 
             // UI 스레드: 입력 칸을 비우고 재진입을 막는다. 프롬프트는 문서를 읽은 뒤 그 문서의
             // 대화에 쌓는다.
             let _ = txt_prompt.set_text("");
             btn_run.hwnd().EnableWindow(false);
+            // 새 답이 오기 전에는 이전 답을 넣지 않는다.
+            with_ui(|ui| {
+                ui.answer = None;
+                ui.btn_insert.hwnd().EnableWindow(false);
+            });
 
             // 워커 스레드로 넘길 Send 상태만 복제.
             let wnd = wnd.clone();
@@ -434,7 +466,7 @@ impl MainWindow {
             );
             std::thread::spawn(move || {
                 let started = Instant::now();
-                // 창을 연 뒤에 서버가 켜진 경우 등, 모델 칸에 서버에 없는 모델이 남아 있을 수 있다.
+                // 창을 연 뒤에 서버가 켜진 경우 등, 서버에 없는 모델이 설정에 남아 있을 수 있다.
                 let cfg = preflight_model(cfg, &wnd);
                 let doc = acquire_document(format);
                 match &doc {
@@ -461,10 +493,12 @@ impl MainWindow {
                     });
                 }
                 // 키가 실행마다 달라질 수 있어 백엔드는 실행할 때 만든다.
+                // 답을 넣을 원래 문서.
+                let origin = doc.as_ref().ok().and_then(|d| d.origin.clone());
                 let result = doc.and_then(|doc| {
                     RigBackend::new(&cfg)
                         .and_then(|backend| {
-                            // 편집 창에서 저장한 내용이 바로 반영되도록 요청마다 읽는다.
+                            // 설정 창에서 저장한 내용이 바로 반영되도록 요청마다 읽는다.
                             let custom_system = settings::load_custom_system_prompt();
                             run_workflow(&cfg, &backend, &doc, format, &user_prompt, &custom_system)
                         })
@@ -490,14 +524,17 @@ impl MainWindow {
                 let wnd_ui = wnd.clone();
                 wnd.run_ui_thread(move || {
                     match &result {
-                        Ok(_) => set_status(&format!(
-                            "LLM 상태: ✔ 작동 중 — {} · 마지막 요청 성공({secs}초)",
-                            llm::describe_target(&cfg)
-                        )),
+                        Ok(_) => set_status(
+                            Target::Main,
+                            &format!(
+                                "LLM 상태: ✔ 작동 중 — {} · 마지막 요청 성공({secs}초)",
+                                llm::describe_target(&cfg)
+                            ),
+                        ),
                         // 실패하면 서버를 다시 점검해 원인을 상태 줄에 보인다.
-                        Err(_) => check_server(&wnd_ui, Arc::clone(&cfg)),
+                        Err(_) => check_server(&wnd_ui, Arc::clone(&cfg), Target::Main),
                     }
-                    finish_on_ui(&wnd_ui, &header, result);
+                    finish_on_ui(&wnd_ui, &header, result, origin);
                     Ok(())
                 });
             });
@@ -511,11 +548,15 @@ impl MainWindow {
     }
 }
 
-/// 환경 변수 설정에 GUI의 키 칸과 모델 칸 값을 덮어쓴 설정. 빈 칸은 무시한다.
-fn effective_cfg(base: &Arc<Config>, api_key: &str, model: &str) -> Arc<Config> {
+/// 환경 변수 설정에 설정 창의 키·서버 주소·모델 값을 덮어쓴 설정. 빈 값은 무시한다.
+/// 서버 주소는 로컬/OpenAI 호환 서버에만 쓴다(키를 넣어 Claude API로 실행하면 쓰지 않음).
+fn effective_cfg(base: &Arc<Config>, api_key: &str, base_url: &str, model: &str) -> Arc<Config> {
     let mut cfg = Config::clone(base);
     if !api_key.trim().is_empty() {
         cfg = cfg.with_claude_key(api_key.trim());
+    }
+    if !base_url.trim().is_empty() {
+        cfg = cfg.with_base_url(base_url.trim());
     }
     if !model.trim().is_empty() {
         cfg = cfg.with_model(model.trim());
@@ -523,10 +564,37 @@ fn effective_cfg(base: &Arc<Config>, api_key: &str, model: &str) -> Arc<Config> 
     Arc::new(cfg)
 }
 
+/// 적용된 설정으로 요청할 때의 설정.
+fn session_cfg(ui: &Ui) -> Arc<Config> {
+    effective_cfg(&ui.base, &ui.session.api_key, &ui.session.base_url, &ui.session.model)
+}
+
+/// 적용된 설정의 서버를 점검할 때의 설정. 모델은 설정의 기본 모델로 둔다([`pick_model`]이 적용된
+/// 모델이 목록에 없을 때 대신 고르는 모델이다).
+fn check_cfg(ui: &Ui) -> Arc<Config> {
+    effective_cfg(&ui.base, &ui.session.api_key, &ui.session.base_url, "")
+}
+
+/// 메인 창의 요약 줄을 적용된 설정으로 고친다(UI 스레드).
+fn update_summary(ui: &Ui) {
+    let cfg = session_cfg(ui);
+    let key = if ui.session.api_key.trim().is_empty() {
+        ""
+    } else {
+        " · Claude API 키 입력함"
+    };
+    let text = format!(
+        "모델: {} · 보낼 문서: {}{key}",
+        cfg.llm_model,
+        ui.session.format.short()
+    );
+    let _ = ui.summary.hwnd().SetWindowText(&text);
+}
+
 /// 보내기 직전(워커 스레드)에 로컬/OpenAI 호환 서버의 모델 목록을 받아, 보낼 모델이 서버에 없으면
-/// 목록의 첫 모델로 바꾼다. 상태 줄과 모델 칸도 그 결과로 갱신한다.
+/// 목록의 첫 모델로 바꾼다. 메인 창의 상태 줄과 적용된 모델도 그 결과로 갱신한다.
 ///
-/// 창을 열 때 서버가 아직 꺼져 있어 점검이 실패하면 모델 칸에 설정의 기본 모델이 그대로 남는다.
+/// 창을 열 때 서버가 아직 꺼져 있어 점검이 실패하면 설정의 기본 모델이 그대로 남는다.
 /// 그 뒤 서버가 켜졌을 때 그 모델이 서버에 없으면 "model not found"(404)로 실패하므로 여기서 막는다.
 /// Claude API는 목록에 없는 별칭도 받으므로 점검하지 않는다.
 fn preflight_model(cfg: Arc<Config>, wnd: &gui::WindowMain) -> Arc<Config> {
@@ -547,7 +615,7 @@ fn preflight_model(cfg: Arc<Config>, wnd: &gui::WindowMain) -> Arc<Config> {
     let default_model = chosen.llm_model.clone();
     let provider = chosen.llm_provider;
     wnd.run_ui_thread(move || {
-        show_status(status, &default_model, provider);
+        show_status(Target::Main, status, &default_model, provider);
         if let Some(note) = note {
             append_status(&note);
         }
@@ -556,26 +624,27 @@ fn preflight_model(cfg: Arc<Config>, wnd: &gui::WindowMain) -> Arc<Config> {
     chosen
 }
 
-/// 상태 줄 끝에 글을 덧붙인다(UI 스레드).
+/// 메인 창의 상태 줄 끝에 글을 덧붙인다(UI 스레드).
 fn append_status(text: &str) {
-    SERVER_UI.with_borrow(|ui| {
-        if let Some((_, lbl)) = ui {
-            let current = lbl.hwnd().GetWindowText().unwrap_or_default();
-            let _ = lbl.hwnd().SetWindowText(&format!("{current}{text}"));
-        }
+    with_ui(|ui| {
+        let current = ui.status.hwnd().GetWindowText().unwrap_or_default();
+        let _ = ui.status.hwnd().SetWindowText(&format!("{current}{text}"));
     });
 }
 
-/// 워커 스레드에서 서버를 점검하고, UI 스레드에서 상태 줄과 모델 칸을 채운다.
-fn check_server(wnd: &gui::WindowMain, cfg: Arc<Config>) {
-    set_status(&format!("LLM 상태: … 확인 중 — {}", llm::describe_target(&cfg)));
-    // API 종류가 바뀌었으면 그 종류의 대화로 바꾼다.
-    chat_set_provider(cfg.llm_provider);
+/// 워커 스레드에서 서버를 점검하고, UI 스레드에서 `target`의 상태 줄과 모델을 채운다.
+fn check_server(wnd: &gui::WindowMain, cfg: Arc<Config>, target: Target) {
+    set_status(target, &format!("LLM 상태: … 확인 중 — {}", llm::describe_target(&cfg)));
+    // 적용된 설정의 API 종류가 바뀌었으면 그 종류의 대화로 바꾼다.
+    if let Target::Main = target {
+        chat_set_provider(cfg.llm_provider);
+    }
     let wnd = wnd.clone();
     std::thread::spawn(move || {
         let status = llm::check_server(&cfg);
         tracing::info!(
-            target = %status.target,
+            ?target,
+            target_server = %status.target,
             state = %status.state.summary(),
             elapsed_ms = status.elapsed_ms,
             "LLM 서버 점검"
@@ -583,27 +652,32 @@ fn check_server(wnd: &gui::WindowMain, cfg: Arc<Config>) {
         let default_model = cfg.llm_model.clone();
         let provider = cfg.llm_provider;
         wnd.run_ui_thread(move || {
-            show_status(status, &default_model, provider);
+            show_status(target, status, &default_model, provider);
             Ok(())
         });
     });
 }
 
-fn set_status(text: &str) {
-    SERVER_UI.with_borrow(|ui| {
-        if let Some((_, lbl)) = ui {
+/// `target`의 상태 줄을 바꾼다(UI 스레드). 설정 창이 닫혀 있으면 설정 창 쪽은 버린다.
+fn set_status(target: Target, text: &str) {
+    with_ui(|ui| {
+        let lbl = match target {
+            Target::Main => Some(&ui.status),
+            Target::Settings => ui.settings.as_ref().map(|s| &s.lbl_status),
+        };
+        if let Some(lbl) = lbl {
             let _ = lbl.hwnd().SetWindowText(text);
         }
     });
 }
 
-/// 점검 결과를 상태 줄에 보이고, 성공했으면 모델 칸 목록을 채운다(UI 스레드).
+/// 점검 결과를 `target`의 상태 줄에 보이고, 성공했으면 모델 목록을 채운다(UI 스레드).
 ///
-/// 칸에 있던 모델이 새 목록에 있으면 그대로 두고, 없으면(백엔드가 바뀐 경우 등) 설정의 기본
-/// 모델로 바꾼다. 그 모델도 목록에 없으면 상태 줄에 경고를 붙인다.
-fn show_status(status: ServerStatus, default_model: &str, provider: Provider) {
+/// 지금 모델이 새 목록에 있으면 그대로 두고, 없으면(백엔드가 바뀐 경우 등) 설정의 기본 모델로
+/// 바꾼다. 그 모델도 목록에 없으면 상태 줄에 경고를 붙인다.
+fn show_status(target: Target, status: ServerStatus, default_model: &str, provider: Provider) {
     let ServerStatus {
-        target,
+        target: server,
         state,
         elapsed_ms,
     } = status;
@@ -611,7 +685,13 @@ fn show_status(status: ServerStatus, default_model: &str, provider: Provider) {
         ServerState::Working(models) => {
             // 로컬/OpenAI 호환 서버의 목록은 쓸 수 있는 모델 전부다. Claude API는 목록에 없는
             // 별칭도 받으므로 목록에 없다고 다른 모델로 바꾸지 않는다.
-            let note = match fill_models(&models, default_model, provider == Provider::OpenAiCompatible) {
+            let pick = fill_models(
+                target,
+                &models,
+                default_model,
+                provider == Provider::OpenAiCompatible,
+            );
+            let note = match pick {
                 ModelPick::Kept => String::new(),
                 ModelPick::Replaced { missing, picked } => {
                     format!(" · 모델 {missing}이(가) 서버에 없어 {picked}을(를) 선택함")
@@ -619,74 +699,162 @@ fn show_status(status: ServerStatus, default_model: &str, provider: Provider) {
                 ModelPick::Missing => " · ⚠ 선택한 모델이 목록에 없음".to_string(),
             };
             format!(
-                "LLM 상태: ✔ 작동 중 — {target} (응답 {elapsed_ms}ms, 모델 {}개){note}",
+                "LLM 상태: ✔ 작동 중 — {server} (응답 {elapsed_ms}ms, 모델 {}개){note}",
                 models.len()
             )
         }
         ServerState::NoKey => "LLM 상태: ✖ 키 없음 — Claude API 키를 입력하세요".to_string(),
         ServerState::Unreachable(e) => {
-            format!("LLM 상태: ✖ 연결 안 됨 — {target} (서버가 꺼져 있거나 주소가 틀림): {e}")
+            format!("LLM 상태: ✖ 연결 안 됨 — {server} (서버가 꺼져 있거나 주소가 틀림): {e}")
         }
         ServerState::AuthFailed(e) => {
-            format!("LLM 상태: ✖ 인증 실패 — {target} (키를 확인하세요): {e}")
+            format!("LLM 상태: ✖ 인증 실패 — {server} (키를 확인하세요): {e}")
         }
-        ServerState::Failed(e) => format!("LLM 상태: ✖ 오류 — {target}: {e}"),
+        ServerState::Failed(e) => format!("LLM 상태: ✖ 오류 — {server}: {e}"),
     };
-    set_status(&text);
+    set_status(target, &text);
 }
 
-/// [`fill_models`]가 모델 칸에 남긴 모델.
+/// [`pick_model`]이 고른 결과.
 enum ModelPick {
-    /// 칸의 모델이나 설정의 기본 모델이 목록에 있어 그대로 두었다.
+    /// 지금 모델이나 설정의 기본 모델이 목록에 있어 그대로 두었다.
     Kept,
     /// 둘 다 목록에 없어 목록의 첫 모델로 바꿨다.
     Replaced { missing: String, picked: String },
-    /// 목록에 없는 모델이 칸에 남았다.
+    /// 목록에 없는 모델이 남았다.
     Missing,
 }
 
-/// 모델 칸 목록을 `models`로 바꾸고 쓸 모델을 고른다.
+/// 받은 모델 목록으로 `target`의 모델을 고른다(UI 스레드).
 ///
-/// 칸의 모델 → 설정의 기본 모델 순으로 목록에 있는 것을 고른다. 둘 다 없고 `replace_missing`이면
-/// 목록의 첫 모델을 고른다. 없는 모델이 남아 있으면 요청이 "model not found"로 실패하기 때문이다.
-fn fill_models(models: &[String], default_model: &str, replace_missing: bool) -> ModelPick {
-    SERVER_UI.with_borrow(|ui| {
-        let Some((cmb, _)) = ui else {
-            return ModelPick::Kept;
-        };
-        let current = cmb.hwnd().GetWindowText().unwrap_or_default();
-        let current = current.trim();
-        let wanted = if models.iter().any(|m| m == current) {
-            current
-        } else {
-            default_model
-        };
-        cmb.items().delete_all();
-        let _ = cmb.items().add(models);
-        if let Some(i) = models.iter().position(|m| m == wanted) {
-            cmb.items().select(Some(i as u32));
-            return ModelPick::Kept;
+/// 메인 창이면 적용된 모델과 모델 목록을 바꾸고 요약 줄을 고친다. 설정 창이면 그 창의 모델 칸만
+/// 바꾼다.
+fn fill_models(
+    target: Target,
+    models: &[String],
+    default_model: &str,
+    replace_missing: bool,
+) -> ModelPick {
+    with_ui(|ui| match target {
+        Target::Main => {
+            let (chosen, pick) =
+                pick_model(models, &ui.session.model, default_model, replace_missing);
+            ui.session.model = chosen;
+            ui.session.models = models.to_vec();
+            update_summary(ui);
+            pick
         }
-        match models.first() {
-            Some(first) if replace_missing => {
-                cmb.items().select(Some(0));
-                ModelPick::Replaced {
-                    missing: wanted.to_string(),
-                    picked: first.clone(),
-                }
-            }
-            _ => {
-                let _ = cmb.hwnd().SetWindowText(wanted);
-                ModelPick::Missing
-            }
+        Target::Settings => {
+            let Some(s) = &ui.settings else {
+                return ModelPick::Kept;
+            };
+            let current = s.cmb_model.hwnd().GetWindowText().unwrap_or_default();
+            let (chosen, pick) = pick_model(models, &current, default_model, replace_missing);
+            fill_combo(&s.cmb_model, models, &chosen);
+            pick
         }
     })
+    .unwrap_or(ModelPick::Kept)
 }
 
-/// 워커 결과를 UI 스레드에서 반영한다(버튼 재활성화, 대기 줄을 답변이나 오류로 바꿈).
-fn finish_on_ui(wnd: &gui::WindowMain, header: &str, result: Result<String>) {
+/// 쓸 모델을 고른다: 지금 모델 → 설정의 기본 모델 순으로 목록에 있는 것. 둘 다 없고
+/// `replace_missing`이면 목록의 첫 모델. 없는 모델이 남아 있으면 요청이 "model not found"로 실패하기
+/// 때문이다.
+fn pick_model(
+    models: &[String],
+    current: &str,
+    default_model: &str,
+    replace_missing: bool,
+) -> (String, ModelPick) {
+    let current = current.trim();
+    let wanted = if models.iter().any(|m| m == current) {
+        current
+    } else {
+        default_model
+    };
+    if models.iter().any(|m| m == wanted) {
+        return (wanted.to_string(), ModelPick::Kept);
+    }
+    match models.first() {
+        Some(first) if replace_missing => (
+            first.clone(),
+            ModelPick::Replaced {
+                missing: wanted.to_string(),
+                picked: first.clone(),
+            },
+        ),
+        _ => (wanted.to_string(), ModelPick::Missing),
+    }
+}
+
+/// 모델 칸 목록을 `models`로 바꾸고 `chosen`을 칸에 둔다.
+fn fill_combo(cmb: &gui::ComboBox, models: &[String], chosen: &str) {
+    cmb.items().delete_all();
+    let _ = cmb.items().add(models);
+    match models.iter().position(|m| m == chosen) {
+        Some(i) => cmb.items().select(Some(i as u32)),
+        None => {
+            let _ = cmb.hwnd().SetWindowText(chosen);
+        }
+    }
+}
+
+/// 받은 답을 원래 문서(`origin`, 요청 때 읽은 문서)의 커서 자리에 넣는다(워커 스레드). 대화 칸에
+/// 적을 결과 문구를 돌려준다.
+///
+/// 원래 문서에만 넣는다. 다른 탭으로 갔으면 원래 문서를 활성화해 넣고, 찾지 못하면 넣지 않는다
+/// ([`hwp::insert_into`]). 그 문서 안에서 커서를 옮겼으면 옮긴 자리에 넣는다(호출된 위치로 돌아가지
+/// 않음). 문서 내용이 바뀌었는지 확인하는 일은 아직 하지 않는다. `EAT_HWP_DOC`로 시험할 때는 넣지
+/// 않는다.
+fn insert_answer(answer: &str, origin: Option<&hwp::DocIdentity>) -> String {
+    let Some(origin) = origin else {
+        return "한글에서 읽은 문서가 아니라 문서에 넣지 않음".to_string();
+    };
+    let text = answer.trim();
+    if text.is_empty() {
+        return "빈 답이라 문서에 넣지 않음".to_string();
+    }
+    match hwp::connect().and_then(|hwp| hwp::insert_into(&hwp, origin, text)) {
+        Ok(switched) => {
+            tracing::info!(
+                chars = text.chars().count(),
+                doc_id = origin.id,
+                doc = %origin.full_name,
+                switched,
+                "원래 문서 커서 자리에 넣음"
+            );
+            if switched {
+                "원래 문서로 돌아가 커서 자리에 넣음".to_string()
+            } else {
+                "문서의 커서 자리에 넣음".to_string()
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %format!("{e:#}"), "문서에 넣지 못함");
+            format!("⚠ 문서에 넣지 못함: {e:#}")
+        }
+    }
+}
+
+/// 워커 결과를 UI 스레드에서 반영한다(버튼 재활성화, 대기 줄을 답변이나 오류로 바꿈). 답을 받았으면
+/// "커서 위치에 삽입"으로 넣을 수 있게 둔다.
+fn finish_on_ui(
+    wnd: &gui::WindowMain,
+    header: &str,
+    result: Result<String>,
+    origin: Option<hwp::DocIdentity>,
+) {
     if let Ok(btn) = wnd.hwnd().GetDlgItem(ID_BTN_RUN) {
         btn.EnableWindow(true);
+    }
+    if let Ok(answer) = &result {
+        with_ui(|ui| {
+            ui.answer = Some(Answer {
+                text: answer.clone(),
+                origin,
+            });
+            ui.btn_insert.hwnd().EnableWindow(true);
+        });
     }
     match result {
         Ok(answer) => chat_finish(header, &answer),
@@ -765,7 +933,7 @@ fn chat_save() {
     });
     if let Some(Err(e)) = saved {
         tracing::warn!(error = %format!("{e:#}"), "대화 기록 저장 실패");
-        set_status(&format!("대화 기록 저장 실패: {e:#}"));
+        set_status(Target::Main, &format!("대화 기록 저장 실패: {e:#}"));
     }
 }
 
@@ -811,6 +979,15 @@ fn chat_finish(header: &str, body: &str) {
     });
 }
 
+/// 대화 칸 끝에 알림 줄(`↳ 알림 · 시각`)을 덧붙인다(UI 스레드).
+fn chat_note(note: &str) {
+    CHAT.with_borrow(|chat| {
+        if let Some(chat) = chat {
+            chat_append(&chat.log, &format!("↳ {note} · {}\r\n\r\n", now_text()));
+        }
+    });
+}
+
 /// 지금 시스템 로컬 시간. 예: `2026-11-09 14:03:21`
 fn now_text() -> String {
     let t = winsafe::GetLocalTime();
@@ -849,27 +1026,186 @@ fn run_workflow(
     workflow::run_prompt(cfg, backend, &doc.content, format, user_prompt, custom_system)
 }
 
-/// 사용자 지정 시스템 프롬프트를 고치는 모달 창. "저장"을 누르면 파일에 쓰고 닫는다.
-fn edit_custom_system_prompt(parent: &gui::WindowMain) {
+/// 설정 창의 고정 프롬프트 제목.
+fn fixed_prompt_title(format: DocFormat) -> String {
+    format!(
+        "고정 프롬프트 — 코드가 정한 규약, 고칠 수 없음 (형식: {}, 커서 표시가 있을 때)",
+        format.short()
+    )
+}
+
+/// 문서 형식 칸에서 고른 형식. 고른 것이 없으면 기본 형식.
+fn selected_format(cmb: &gui::ComboBox) -> DocFormat {
+    cmb.items()
+        .selected_index()
+        .and_then(|i| DocFormat::ALL.get(i as usize).copied())
+        .unwrap_or(DocFormat::DEFAULT)
+}
+
+/// 설정 창(모달). LLM 연결(키·서버 주소·모델·상태 확인), 보낼 문서 형식, 시스템 프롬프트를 고친다.
+///
+/// "확인"을 누르면 사용자 지정 지침과 서버 주소·모델·형식을 파일에 쓰고 적용한다. 키는 저장하지 않고
+/// 이번 실행에만 쓴다. 키·주소·모델이 바뀌었으면 메인 창의 상태를 다시 점검한다. "취소"는 바꾼 값을
+/// 버린다.
+fn open_settings(parent: &gui::WindowMain) {
+    let Some((base, session, main_status)) = with_ui(|ui| {
+        (
+            Arc::clone(&ui.base),
+            ui.session.clone(),
+            ui.status.hwnd().GetWindowText().unwrap_or_default(),
+        )
+    }) else {
+        return;
+    };
+
     let dlg = gui::WindowModal::new(gui::WindowModalOpts {
-        title: "사용자 지정 시스템 프롬프트",
-        size: gui::dpi(480, 360),
+        title: "설정",
+        size: gui::dpi(520, 642),
         ..Default::default()
     });
-    let _lbl = gui::Label::new(
+
+    // ── LLM 연결 ──
+    let _lbl_key = gui::Label::new(
         &dlg,
         gui::LabelOpts {
-            text: "규약 지시(커서 표시, 넣을 본문만 쓰기 등) 뒤에 붙는 지침입니다. 비우면 붙이지 않습니다.",
+            text: "Claude API 키 (비우면 환경 변수 설정 사용, 저장하지 않음)",
             position: gui::dpi(10, 10),
             ..Default::default()
         },
     );
-    let txt = gui::Edit::new(
+    let txt_key = gui::Edit::new(
         &dlg,
         gui::EditOpts {
-            position: gui::dpi(10, 32),
-            width: gui::dpi_x(460),
-            height: gui::dpi_y(280),
+            position: gui::dpi(10, 28),
+            width: gui::dpi_x(500),
+            control_style: co::ES::AUTOHSCROLL | co::ES::PASSWORD,
+            ..Default::default()
+        },
+    );
+    let env_url = if base.llm_provider == Provider::OpenAiCompatible {
+        base.llm_base_url.clone()
+    } else {
+        "환경 변수 설정은 Claude API".to_string()
+    };
+    let _lbl_url = gui::Label::new(
+        &dlg,
+        gui::LabelOpts {
+            text: &format!(
+                "로컬/OpenAI 호환 서버 주소 (비우면 {env_url}, Claude API에는 쓰지 않음)"
+            ),
+            position: gui::dpi(10, 58),
+            size: gui::dpi(500, 16),
+            ..Default::default()
+        },
+    );
+    let txt_url = gui::Edit::new(
+        &dlg,
+        gui::EditOpts {
+            position: gui::dpi(10, 76),
+            width: gui::dpi_x(500),
+            control_style: co::ES::AUTOHSCROLL,
+            ..Default::default()
+        },
+    );
+    let _lbl_model = gui::Label::new(
+        &dlg,
+        gui::LabelOpts {
+            text: "모델 (목록에서 고르거나 직접 입력, 비우면 환경 변수 설정 사용)",
+            position: gui::dpi(10, 106),
+            ..Default::default()
+        },
+    );
+    let cmb_model = gui::ComboBox::new(
+        &dlg,
+        gui::ComboBoxOpts {
+            position: gui::dpi(10, 124),
+            width: gui::dpi_x(380),
+            // 목록에 없는 모델 이름도 직접 입력할 수 있게 편집형으로 둔다.
+            control_style: co::CBS::DROPDOWN,
+            ..Default::default()
+        },
+    );
+    let btn_check = gui::Button::new(
+        &dlg,
+        gui::ButtonOpts {
+            text: "상태 확인",
+            position: gui::dpi(400, 123),
+            width: gui::dpi_x(110),
+            ..Default::default()
+        },
+    );
+    let lbl_status = gui::Label::new(
+        &dlg,
+        gui::LabelOpts {
+            text: "",
+            position: gui::dpi(10, 152),
+            // 상태 문구가 바뀌어 길어지므로 폭을 고정한다.
+            size: gui::dpi(500, 16),
+            ..Default::default()
+        },
+    );
+    let _lbl_format = gui::Label::new(
+        &dlg,
+        gui::LabelOpts {
+            text: "LLM에 보낼 문서",
+            position: gui::dpi(10, 180),
+            ..Default::default()
+        },
+    );
+    let format_labels: Vec<&str> = DocFormat::ALL.iter().map(|f| f.label()).collect();
+    let cmb_format = gui::ComboBox::new(
+        &dlg,
+        gui::ComboBoxOpts {
+            position: gui::dpi(120, 176),
+            width: gui::dpi_x(260),
+            items: &format_labels,
+            selected_item: DocFormat::ALL
+                .iter()
+                .position(|f| *f == session.format)
+                .map(|i| i as u32),
+            ..Default::default()
+        },
+    );
+
+    // ── 시스템 프롬프트 ──
+    let lbl_fixed = gui::Label::new(
+        &dlg,
+        gui::LabelOpts {
+            text: &fixed_prompt_title(session.format),
+            position: gui::dpi(10, 210),
+            size: gui::dpi(500, 16),
+            ..Default::default()
+        },
+    );
+    let txt_fixed = gui::Edit::new(
+        &dlg,
+        gui::EditOpts {
+            position: gui::dpi(10, 228),
+            width: gui::dpi_x(500),
+            height: gui::dpi_y(170),
+            control_style: co::ES::MULTILINE | co::ES::AUTOVSCROLL | co::ES::READONLY,
+            window_style: co::WS::CHILD
+                | co::WS::VISIBLE
+                | co::WS::TABSTOP
+                | co::WS::GROUP
+                | co::WS::VSCROLL,
+            ..Default::default()
+        },
+    );
+    let _lbl_custom = gui::Label::new(
+        &dlg,
+        gui::LabelOpts {
+            text: "사용자 지정 지침 — 위 규약 안의 표시된 자리에 들어갑니다. 비우면 붙이지 않습니다.",
+            position: gui::dpi(10, 408),
+            ..Default::default()
+        },
+    );
+    let txt_custom = gui::Edit::new(
+        &dlg,
+        gui::EditOpts {
+            position: gui::dpi(10, 426),
+            width: gui::dpi_x(500),
+            height: gui::dpi_y(170),
             control_style: co::ES::MULTILINE
                 | co::ES::WANTRETURN
                 | co::ES::AUTOVSCROLL
@@ -882,11 +1218,11 @@ fn edit_custom_system_prompt(parent: &gui::WindowMain) {
             ..Default::default()
         },
     );
-    let btn_save = gui::Button::new(
+    let btn_ok = gui::Button::new(
         &dlg,
         gui::ButtonOpts {
-            text: "저장",
-            position: gui::dpi(290, 322),
+            text: "확인",
+            position: gui::dpi(330, 608),
             width: gui::dpi_x(85),
             ..Default::default()
         },
@@ -895,38 +1231,142 @@ fn edit_custom_system_prompt(parent: &gui::WindowMain) {
         &dlg,
         gui::ButtonOpts {
             text: "취소",
-            position: gui::dpi(385, 322),
+            position: gui::dpi(425, 608),
             width: gui::dpi_x(85),
             ..Default::default()
         },
     );
 
+    // 창이 만들어지면 적용된 값을 채우고, 점검 결과를 받을 수 있게 컨트롤을 맡긴다.
     {
-        let txt = txt.clone();
+        let txt_key = txt_key.clone();
+        let txt_url = txt_url.clone();
+        let cmb_model = cmb_model.clone();
+        let lbl_status = lbl_status.clone();
+        let txt_fixed = txt_fixed.clone();
+        let txt_custom = txt_custom.clone();
+        let session = session.clone();
         dlg.on().wm_create(move |_| {
-            txt.limit_text(None);
-            let _ = txt.set_text(&to_crlf(&settings::load_custom_system_prompt()));
+            let _ = txt_key.set_text(&session.api_key);
+            let _ = txt_url.set_text(&session.base_url);
+            fill_combo(&cmb_model, &session.models, &session.model);
+            let _ = lbl_status.hwnd().SetWindowText(&main_status);
+            let _ = txt_fixed.set_text(&to_crlf(&workflow::system_preview(session.format)));
+            txt_custom.limit_text(None);
+            let _ = txt_custom.set_text(&to_crlf(&settings::load_custom_system_prompt()));
+            with_ui(|ui| {
+                ui.settings = Some(SettingsUi {
+                    cmb_model: cmb_model.clone(),
+                    lbl_status: lbl_status.clone(),
+                })
+            });
             Ok(0)
         });
     }
+
+    // 형식을 바꾸면 고정 프롬프트도 그 형식으로 다시 보인다.
+    {
+        let cmb_format2 = cmb_format.clone();
+        let lbl_fixed = lbl_fixed.clone();
+        let txt_fixed = txt_fixed.clone();
+        cmb_format.on().cbn_sel_change(move || {
+            let format = selected_format(&cmb_format2);
+            let _ = lbl_fixed.hwnd().SetWindowText(&fixed_prompt_title(format));
+            let _ = txt_fixed.set_text(&to_crlf(&workflow::system_preview(format)));
+            Ok(())
+        });
+    }
+
+    // 키·주소 칸의 값까지 반영한 설정으로 서버를 점검한다(키를 넣으면 Claude API). 같은 키·주소로
+    // 이미 점검했으면 `force`가 아닐 때 다시 묻지 않는다.
+    let check = {
+        let parent = parent.clone();
+        let txt_key = txt_key.clone();
+        let txt_url = txt_url.clone();
+        let base = Arc::clone(&base);
+        let last = Rc::new(RefCell::new((session.api_key.clone(), session.base_url.clone())));
+        Rc::new(move |force: bool| {
+            let key = txt_key.text().unwrap_or_default();
+            let url = txt_url.text().unwrap_or_default();
+            let now = (key, url);
+            if !force && *last.borrow() == now {
+                return;
+            }
+            let cfg = effective_cfg(&base, &now.0, &now.1, "");
+            *last.borrow_mut() = now;
+            check_server(&parent, cfg, Target::Settings);
+        })
+    };
+    {
+        let check = Rc::clone(&check);
+        btn_check.on().bn_clicked(move || {
+            check(true);
+            Ok(())
+        });
+    }
+    {
+        let check = Rc::clone(&check);
+        txt_key.on().en_kill_focus(move || {
+            check(false);
+            Ok(())
+        });
+    }
+    txt_url.on().en_kill_focus(move || {
+        check(false);
+        Ok(())
+    });
+
     {
         let dlg2 = dlg.clone();
-        let txt = txt.clone();
-        btn_save.on().bn_clicked(move || {
-            let text = txt.text().unwrap_or_default();
-            match settings::save_custom_system_prompt(&text) {
-                Ok(()) => {
-                    tracing::info!(chars = text.trim().chars().count(), "사용자 지정 시스템 프롬프트 저장");
-                    dlg2.close();
-                }
-                Err(e) => {
-                    tracing::warn!(error = %format!("{e:#}"), "사용자 지정 시스템 프롬프트 저장 실패");
-                    let _ = dlg2.hwnd().MessageBox(
-                        &format!("{e:#}"),
-                        "저장 실패",
-                        co::MB::OK | co::MB::ICONERROR,
-                    );
-                }
+        let parent = parent.clone();
+        btn_ok.on().bn_clicked(move || {
+            let custom = txt_custom.text().unwrap_or_default();
+            let key = txt_key.text().unwrap_or_default().trim().to_string();
+            let saved = settings::GuiSettings {
+                base_url: txt_url.text().unwrap_or_default().trim().to_string(),
+                model: cmb_model
+                    .hwnd()
+                    .GetWindowText()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string(),
+                format: Some(selected_format(&cmb_format)),
+            };
+            let written = settings::save_custom_system_prompt(&custom)
+                .and_then(|()| settings::save_gui_settings(&saved));
+            if let Err(e) = written {
+                tracing::warn!(error = %format!("{e:#}"), "설정 저장 실패");
+                let _ = dlg2.hwnd().MessageBox(
+                    &format!("{e:#}"),
+                    "저장 실패",
+                    co::MB::OK | co::MB::ICONERROR,
+                );
+                return Ok(());
+            }
+            let check = with_ui(|ui| {
+                let s = &mut ui.session;
+                let changed =
+                    s.api_key != key || s.base_url != saved.base_url || s.model != saved.model;
+                s.api_key = key.clone();
+                s.base_url = saved.base_url.clone();
+                s.model = saved.model.clone();
+                s.format = saved.format.unwrap_or(DocFormat::DEFAULT);
+                update_summary(ui);
+                changed.then(|| check_cfg(ui))
+            })
+            .flatten();
+            tracing::info!(
+                key_set = !key.is_empty(),
+                base_url = %saved.base_url,
+                model = %saved.model,
+                format = ?saved.format,
+                custom_chars = custom.trim().chars().count(),
+                "설정 저장·적용"
+            );
+            dlg2.close();
+            // 키·주소·모델이 바뀌었으면 메인 창의 상태를 다시 점검한다(대화의 API 종류도 이때 바뀐다).
+            if let Some(cfg) = check {
+                check_server(&parent, cfg, Target::Main);
             }
             Ok(())
         });
@@ -939,8 +1379,10 @@ fn edit_custom_system_prompt(parent: &gui::WindowMain) {
         });
     }
     if let Err(e) = dlg.show_modal(parent) {
-        tracing::warn!(error = %e, "시스템 프롬프트 창을 열지 못함");
+        tracing::warn!(error = %e, "설정 창을 열지 못함");
     }
+    // 창이 닫힌 뒤 도착한 점검 결과는 버린다.
+    with_ui(|ui| ui.settings = None);
 }
 
 /// 고른 형식에 맞게 문서 내용과(가능하면) 커서 위치를 확보한다.
@@ -963,13 +1405,30 @@ fn acquire_document(format: DocFormat) -> Result<DocSnapshot> {
                     caret: None,
                 },
             };
-            return Ok(DocSnapshot { content, path: p });
+            return Ok(DocSnapshot {
+                content,
+                path: p,
+                origin: None,
+            });
         }
     }
     let hwp = hwp::connect()?;
-    match format {
+    // 읽는 문서를 기록해 두고, 답은 이 문서에만 넣는다. 읽는 사이 활성 문서가 바뀌면 어느 문서를
+    // 읽었는지 확실하지 않으므로 실패로 본다.
+    let before = hwp::active_document(&hwp)?;
+    let mut snapshot = match format {
         DocFormat::Plain | DocFormat::Hwpml => hwp::document_snapshot(&hwp),
         DocFormat::Markdown => hwp::document_markdown(&hwp),
         DocFormat::HwpmlFile => hwp::document_hwpml_file(&hwp),
+    }?;
+    let after = hwp::active_document(&hwp)?;
+    if before != after {
+        return Err(anyhow!(
+            "문서를 읽는 사이 활성 문서가 바뀌었습니다({:?} → {:?}). 다시 보내 주세요",
+            before.full_name,
+            after.full_name
+        ));
     }
+    snapshot.origin = Some(before);
+    Ok(snapshot)
 }

@@ -764,7 +764,7 @@ dependencies = [
 
 [[package]]
 name = "hwp_addon"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "hwp_core",
  "thiserror",
@@ -776,7 +776,7 @@ dependencies = [
 
 [[package]]
 name = "hwp_com"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "hwp_core",
  "thiserror",
@@ -786,7 +786,7 @@ dependencies = [
 
 [[package]]
 name = "hwp_core"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "quick-xml 0.42.0",
  "thiserror",

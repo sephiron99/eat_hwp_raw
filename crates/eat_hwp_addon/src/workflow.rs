@@ -87,6 +87,21 @@ impl DocFormat {
         }
     }
 
+    /// 설정 파일에 쓰는 이름.
+    pub fn id(self) -> &'static str {
+        match self {
+            DocFormat::Plain => "plain",
+            DocFormat::Hwpml => "hwpml",
+            DocFormat::Markdown => "markdown",
+            DocFormat::HwpmlFile => "hwpml_file",
+        }
+    }
+
+    /// [`DocFormat::id`]의 반대. 모르는 이름이면 `None`.
+    pub fn from_id(id: &str) -> Option<DocFormat> {
+        DocFormat::ALL.into_iter().find(|f| f.id() == id)
+    }
+
     /// 대화 머리줄에 붙일 짧은 이름.
     pub fn short(self) -> &'static str {
         match self {
@@ -124,6 +139,16 @@ impl DocFormat {
 /// 매 요청 같은 문장을 앞에 두고 형식·커서에 따라 바뀌는 문장을 뒤에 둔다. 앞부분이 같으면 로컬
 /// 서버가 이전 계산을 재사용할 여지가 있다. 규약 부분은 코드가 갖고 사용자가 고칠 수 없다(바꾸면
 /// 결과를 문서에 넣는 흐름이 깨진다).
+/// 시스템 메시지 미리보기: `format` 형식에 커서 표시가 있을 때의 고정 규약(①)과, 사용자 지정 지침(②)이
+/// 들어갈 자리. GUI의 시스템 프롬프트 편집 창에 보인다.
+pub fn system_preview(format: DocFormat) -> String {
+    build_system(
+        format,
+        true,
+        "(아래 칸에 쓴 사용자 지정 지침이 이 자리에 들어갑니다. 비우면 이 부분은 빠집니다.)",
+    )
+}
+
 fn build_system(format: DocFormat, has_caret: bool, custom_system: &str) -> String {
     let mut system = String::from(
         "당신은 HWP 문서 작성 도우미입니다. 사용자가 보낸 문서의 양식(제목/소제목/문단 구조)을 최대한 \
