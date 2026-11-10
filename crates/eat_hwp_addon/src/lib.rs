@@ -33,6 +33,7 @@ mod gui;
 mod hwp;
 mod llm;
 mod markdown;
+mod mcp;
 mod parse;
 mod settings;
 mod workflow;

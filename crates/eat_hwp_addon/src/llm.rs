@@ -3,10 +3,15 @@
 //! 백엔드 정본은 rig-rs(CLAUDE.md Dependencies)다. OpenAI 호환 로컬/원격 엔드포인트와
 //! Claude API를 지원한다. 트레이트로 추상화해 두어 백엔드를 동일 인터페이스로 교체한다.
 //! Gemini는 추후 지원(설계만 반영).
+//!
+//! MCP 서버가 설정돼 있으면 그 도구를 LLM에 주고, LLM이 도구를 부르면 대신 실행해 결과를 돌려주는
+//! 일을 답이 나올 때까지 되풀이한다([`MAX_TOOL_TURNS`]번까지).
 
 use crate::config::{Config, Provider};
+use crate::mcp;
 use anyhow::{Result, anyhow, bail};
-use rig::completion::{CompletionRequest, Reasoning};
+use rig::completion::{CompletionRequest, CompletionResponse, Message, Reasoning};
+use rig::message::{ToolCall, ToolChoice, ToolResultContent};
 use rig::driver::Model;
 use rig::error::ProviderError;
 use rig::providers::anthropic::{Anthropic, AnthropicConfig};
@@ -17,11 +22,30 @@ use rig::providers::openai::wire::Chat;
 /// Claude API 응답의 최대 출력 토큰. Messages API는 이 값을 반드시 요구한다.
 const ANTHROPIC_MAX_TOKENS: u64 = 16_000;
 
+/// 도구를 부르고 결과를 받는 일을 되풀이하는 최대 횟수. 넘으면 도구 없이 답을 쓰게 한다.
+const MAX_TOOL_TURNS: usize = 6;
+
+/// 대화 칸에 보일 도구 인자의 최대 글자 수.
+const MAX_LOG_ARGS: usize = 120;
+
+/// LLM의 답.
+pub struct Completion {
+    /// 문서에 넣을 답.
+    pub text: String,
+    /// MCP 도구를 부른 기록과 알림. 대화 칸에 답 앞에 보인다(문서에는 넣지 않음).
+    pub log: Vec<String>,
+}
+
 /// 시스템 메시지와 사용자 메시지를 받아 응답 텍스트를 생성하는 LLM 백엔드.
 ///
-/// 시스템 메시지(지시)는 `workflow`가 요청마다 만든다.
+/// 시스템 메시지(지시)는 `workflow`가 요청마다 만든다. `mcp_servers`가 있으면 그 도구를 LLM에 준다.
 pub trait LlmBackend {
-    fn complete(&self, system: &str, user: &str) -> Result<String>;
+    fn complete(
+        &self,
+        system: &str,
+        user: &str,
+        mcp_servers: &[mcp::ServerSpec],
+    ) -> Result<Completion>;
 }
 
 /// rig-rs 기반 백엔드. OpenAI 호환 엔드포인트(로컬 Ollama/vLLM, 원격 DGX 등) 또는 Claude API로
@@ -61,28 +85,128 @@ impl RigBackend {
     }
 }
 
+impl RigBackend {
+    /// 요청 하나를 보낸다.
+    async fn call(&self, request: CompletionRequest) -> Result<CompletionResponse> {
+        let response = match &self.model {
+            // 추론(thinking) 모델은 끄지 않으면 생각에 토큰을 소진해 본문이 빈 채로 온다(Gemma 4 확인).
+            RigModel::OpenAiCompatible(model) => model.call(request.reasoning(Reasoning::Off)).await,
+            // 추론을 끌 수 없는 Claude 모델이 있어 추론 설정은 API 기본값에 맡긴다.
+            RigModel::Anthropic(model) => {
+                model.call(request.max_tokens(ANTHROPIC_MAX_TOKENS)).await
+            }
+        };
+        response.map_err(|e| {
+            tracing::debug!(error = ?e, "rig 오류 상세");
+            anyhow!("rig 호출 실패: {e}")
+        })
+    }
+
+    /// 도구를 주고 답이 나올 때까지 도구 호출을 되풀이한다.
+    async fn complete_with_tools(
+        &self,
+        mut request: CompletionRequest,
+        hub: &mcp::Hub,
+        log: &mut Vec<String>,
+    ) -> Result<String> {
+        request = request.tools(hub.definitions());
+        for turn in 0..=MAX_TOOL_TURNS {
+            if turn == MAX_TOOL_TURNS {
+                // 도구 정의는 그대로 두고(지난 호출 기록과 맞아야 하는 API가 있음) 더 부르지 못하게 한다.
+                log.push(format!("⚠ 도구를 {MAX_TOOL_TURNS}번 불러 도구 없이 답을 받음"));
+                request = request.tool_choice(ToolChoice::None);
+            }
+            let response = self.call(request.clone()).await?;
+            let calls: Vec<ToolCall> = response.tool_calls().cloned().collect();
+            if calls.is_empty() {
+                return Ok(answer_text(&response));
+            }
+            if let Some(message) = response.message() {
+                request.chat_history.push(message);
+            }
+            let mut results = Vec::new();
+            for call in calls {
+                let name = call.function.name.as_str().to_string();
+                let args = serde_json::Value::Object(call.function.arguments.clone()).to_string();
+                tracing::info!(tool = %name, %args, "MCP 도구 호출");
+                let outcome = hub.call(&name, call.function.arguments.clone()).await;
+                match outcome {
+                    Ok(text) => {
+                        log.push(format!(
+                            "⚙ {name} {} → {}자",
+                            shorten_to(&args, MAX_LOG_ARGS),
+                            text.chars().count()
+                        ));
+                        tracing::trace!(tool = %name, %text, "MCP 도구 결과");
+                        results.push(call.result(vec![ToolResultContent::text(text)]));
+                    }
+                    Err(e) => {
+                        let e = format!("{e:#}");
+                        log.push(format!("⚙ {name} {} → ⚠ {e}", shorten_to(&args, MAX_LOG_ARGS)));
+                        tracing::warn!(tool = %name, error = %e, "MCP 도구 실패");
+                        results.push(call.error_result(vec![ToolResultContent::text(e)]));
+                    }
+                }
+            }
+            request.chat_history.push(Message::tool_results(results));
+        }
+        unreachable!("마지막 차례는 도구를 부르지 못하게 하므로 반복 안에서 돌아온다")
+    }
+}
+
 impl LlmBackend for RigBackend {
-    fn complete(&self, system: &str, user: &str) -> Result<String> {
+    fn complete(
+        &self,
+        system: &str,
+        user: &str,
+        mcp_servers: &[mcp::ServerSpec],
+    ) -> Result<Completion> {
         self.runtime.block_on(async {
             // rig는 preamble을 시스템 메시지로 보낸다(OpenAI 호환: 첫 system 메시지, Claude: system 필드).
             let request = CompletionRequest::new(user).preamble(system);
-            let response = match &self.model {
-                // 추론(thinking) 모델은 끄지 않으면 생각에 토큰을 소진해 본문이 빈 채로 온다(Gemma 4 확인).
-                RigModel::OpenAiCompatible(model) => {
-                    model.call(request.reasoning(Reasoning::Off)).await
-                }
-                // 추론을 끌 수 없는 Claude 모델이 있어 추론 설정은 API 기본값에 맡긴다.
-                RigModel::Anthropic(model) => {
-                    model.call(request.max_tokens(ANTHROPIC_MAX_TOKENS)).await
+            let mut log = Vec::new();
+            if mcp_servers.is_empty() {
+                let text = answer_text(&self.call(request).await?);
+                return Ok(Completion { text, log });
+            }
+            let hub = mcp::Hub::connect(mcp_servers).await;
+            log.extend(hub.notes.iter().cloned());
+            let result = if hub.is_empty() {
+                self.call(request).await.map(|r| answer_text(&r))
+            } else {
+                match self.complete_with_tools(request.clone(), &hub, &mut log).await {
+                    // 도구를 받지 못하는 모델(Ollama: "does not support tools")은 도구 없이 다시 보낸다.
+                    Err(e) if format!("{e:#}").to_ascii_lowercase().contains("support tools") => {
+                        tracing::warn!(error = %format!("{e:#}"), "모델이 도구를 받지 않아 도구 없이 보냄");
+                        log.push("⚠ 이 모델은 도구를 받지 않아 MCP 없이 보냄".to_string());
+                        self.call(request).await.map(|r| answer_text(&r))
+                    }
+                    other => other,
                 }
             };
-            let response = response.map_err(|e| {
-                tracing::debug!(error = ?e, "rig 오류 상세");
-                anyhow!("rig 호출 실패: {e}")
-            })?;
-            Ok(response.text())
+            hub.close().await;
+            Ok(Completion { text: result?, log })
         })
     }
+}
+
+/// 응답의 답 글. 추론을 꺼도 생각을 본문에 흘리고 `</think>`로 끝내는 로컬 모델이 있어(Ollama의
+/// qwen3에서 도구 결과를 받은 뒤 확인) 마지막 `</think>` 앞은 버린다.
+fn answer_text(response: &CompletionResponse) -> String {
+    let text = response.text();
+    match text.rfind("</think>") {
+        Some(end) => text[end + "</think>".len()..].trim().to_string(),
+        None => text,
+    }
+}
+
+/// 글이 `max`자를 넘으면 자르고 `…`를 붙인다.
+fn shorten_to(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(max).collect();
+    format!("{head}…")
 }
 
 /// LLM 서버 점검 결과.
@@ -224,7 +348,15 @@ fn anthropic_client(cfg: &Config) -> Result<Anthropic> {
 pub struct EchoBackend;
 
 impl LlmBackend for EchoBackend {
-    fn complete(&self, system: &str, user: &str) -> Result<String> {
-        Ok(format!("[echo backend — rig 미연동]\n{system}\n\n{user}"))
+    fn complete(
+        &self,
+        system: &str,
+        user: &str,
+        _mcp_servers: &[mcp::ServerSpec],
+    ) -> Result<Completion> {
+        Ok(Completion {
+            text: format!("[echo backend — rig 미연동]\n{system}\n\n{user}"),
+            log: Vec::new(),
+        })
     }
 }

@@ -2,6 +2,7 @@
 //!
 //! - `system_prompt.txt`: 사용자 지정 시스템 프롬프트
 //! - `settings.txt`: GUI 설정 창의 서버 주소·모델·문서 형식. API 키는 저장하지 않는다
+//! - `mcp_servers.txt`: MCP 서버 목록(한 줄에 서버 하나, 형식은 `mcp::parse_servers`)
 
 use crate::workflow::DocFormat;
 use anyhow::{Context, Result};
@@ -97,4 +98,31 @@ pub fn save_gui_settings(settings: &GuiSettings) -> Result<()> {
         text.push_str(&format!("format={}\n", format.id()));
     }
     std::fs::write(&file, text).with_context(|| format!("설정을 저장하지 못함: {}", file.display()))
+}
+
+/// MCP 서버 설정 파일 `%USERPROFILE%\.eat_hwp_raw\mcp_servers.txt`(UTF-8).
+pub fn mcp_servers_file() -> Option<PathBuf> {
+    Some(settings_dir()?.join("mcp_servers.txt"))
+}
+
+/// MCP 서버 설정 글. 파일이 없거나 읽지 못하면 빈 문자열. 줄바꿈은 `\n`.
+pub fn load_mcp_servers_text() -> String {
+    mcp_servers_file()
+        .and_then(|file| std::fs::read_to_string(file).ok())
+        .map(|text| text.replace("\r\n", "\n"))
+        .unwrap_or_default()
+}
+
+/// MCP 서버 설정 글을 저장한다. 줄바꿈을 `\n`으로 맞춘다.
+pub fn save_mcp_servers_text(text: &str) -> Result<()> {
+    let file = mcp_servers_file().context("USERPROFILE이 없어 MCP 설정을 저장할 곳을 정하지 못함")?;
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("설정 디렉터리를 만들지 못함: {}", dir.display()))?;
+    }
+    let text = text.replace("\r\n", "\n");
+    let text = text.trim();
+    let text = if text.is_empty() { String::new() } else { format!("{text}\n") };
+    std::fs::write(&file, text)
+        .with_context(|| format!("MCP 설정을 저장하지 못함: {}", file.display()))
 }

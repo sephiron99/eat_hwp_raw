@@ -1,12 +1,13 @@
 //! eat_hwp_raw 워크플로 오케스트레이션.
 //!
-//! 파이프라인: HWPML 파싱 → 컨텍스트+프롬프트 구성 → LLM 실행.
+//! 파이프라인: HWPML 파싱 → 컨텍스트+프롬프트 구성 → LLM 실행(MCP 서버가 있으면 도구 호출 포함).
 //! GUI 프로세스가 LLM을 직접 호출한다(별도 서버는 보류, CLAUDE.md "구조 / 산출물").
-//! (결과 입력은 후속 증분에서 연결한다.)
+//! 답은 GUI의 "커서 위치에 삽입" 버튼으로 문서에 넣는다(`hwp::insert_into`).
 
 use crate::config::Config;
 use crate::hwp::DocContent;
-use crate::llm::LlmBackend;
+use crate::llm::{Completion, LlmBackend};
+use crate::mcp;
 use crate::parse;
 use anyhow::Result;
 
@@ -14,6 +15,7 @@ use anyhow::Result;
 ///
 /// LLM에는 항상 문서 전체를 보낸다. `caret`은 `hwpml` 안에서 커서가 있는 바이트 위치(없으면
 /// `None`)이고, 그 자리에 [`parse::CARET_MARK`]를 넣어 LLM이 커서 위치를 알게 한다.
+/// `mcp_servers`가 있으면 그 도구를 LLM에 준다.
 pub fn run_prompt(
     _cfg: &Config,
     backend: &dyn LlmBackend,
@@ -21,7 +23,8 @@ pub fn run_prompt(
     format: DocFormat,
     user_prompt: &str,
     custom_system: &str,
-) -> Result<String> {
+    mcp_servers: &[mcp::ServerSpec],
+) -> Result<Completion> {
     // 커서 정보가 없으면(예: EAT_HWP_DOC 테스트 경로) 표시 없이 문서 전체만 보낸다.
     let context = match (content, format) {
         (DocContent::Hwpml { hwpml, caret }, DocFormat::Plain) => {
@@ -35,7 +38,7 @@ pub fn run_prompt(
     };
     let has_caret = context.contains(parse::CARET_MARK);
 
-    let system = build_system(format, has_caret, custom_system);
+    let system = build_system(format, has_caret, !mcp_servers.is_empty(), custom_system);
     let user = build_user(&context, user_prompt);
     tracing::debug!(
         ?format,
@@ -49,7 +52,7 @@ pub fn run_prompt(
     tracing::trace!(%system, "시스템 메시지 전문");
     // 문서 내용이 통째로 들어가므로 TRACE에서만 남긴다(EAT_HWP_LOG=trace).
     tracing::trace!(%user, "사용자 메시지 전문");
-    backend.complete(&system, &user)
+    backend.complete(&system, &user, mcp_servers)
 }
 
 /// LLM에 보낼 문서 형식. GUI에서 고른다.
@@ -129,27 +132,29 @@ impl DocFormat {
     }
 }
 
-/// 시스템 메시지: ① 코드가 정하는 규약 지시(역할, 답변 규칙, 문서 형식 설명, 커서 표시 규칙)와
-/// ② 사용자가 GUI에서 고치는 사용자 지정 지침(`custom_system`, 비어 있으면 붙이지 않음).
-///
-/// features(CLAUDE.md): 양식(제목/소제목/문단 구조)을 최대한 준수하고, 인접 제목/소제목
-/// 레벨에 상응하도록 작성한다. 답변은 문서에 그대로 넣을 본문이어야 하므로 설명·인사말·마크다운을
-/// 붙이지 말라고 지시한다. `has_caret`이면 문서 안의 [`parse::CARET_MARK`]가 커서 위치라고 알린다.
-///
-/// 매 요청 같은 문장을 앞에 두고 형식·커서에 따라 바뀌는 문장을 뒤에 둔다. 앞부분이 같으면 로컬
-/// 서버가 이전 계산을 재사용할 여지가 있다. 규약 부분은 코드가 갖고 사용자가 고칠 수 없다(바꾸면
-/// 결과를 문서에 넣는 흐름이 깨진다).
 /// 시스템 메시지 미리보기: `format` 형식에 커서 표시가 있을 때의 고정 규약(①)과, 사용자 지정 지침(②)이
-/// 들어갈 자리. GUI의 시스템 프롬프트 편집 창에 보인다.
-pub fn system_preview(format: DocFormat) -> String {
+/// 들어갈 자리. `has_tools`면 MCP 도구 규칙도 넣는다. GUI의 설정 창에 보인다.
+pub fn system_preview(format: DocFormat, has_tools: bool) -> String {
     build_system(
         format,
         true,
+        has_tools,
         "(아래 칸에 쓴 사용자 지정 지침이 이 자리에 들어갑니다. 비우면 이 부분은 빠집니다.)",
     )
 }
 
-fn build_system(format: DocFormat, has_caret: bool, custom_system: &str) -> String {
+/// 시스템 메시지: ① 코드가 정하는 규약 지시(역할, 답변 규칙, 문서 형식 설명, 커서 표시 규칙, 도구
+/// 규칙)와 ② 사용자가 GUI에서 고치는 사용자 지정 지침(`custom_system`, 비어 있으면 붙이지 않음).
+///
+/// features(CLAUDE.md): 양식(제목/소제목/문단 구조)을 최대한 준수하고, 인접 제목/소제목
+/// 레벨에 상응하도록 작성한다. 답변은 문서에 그대로 넣을 본문이어야 하므로 설명·인사말·마크다운을
+/// 붙이지 말라고 지시한다. `has_caret`이면 문서 안의 [`parse::CARET_MARK`]가 커서 위치라고 알린다.
+/// `has_tools`(MCP 서버가 설정됨)면 도구로 사실·근거를 찾되 그 과정은 답에 쓰지 말라고 알린다.
+///
+/// 매 요청 같은 문장을 앞에 두고 형식·커서에 따라 바뀌는 문장을 뒤에 둔다. 앞부분이 같으면 로컬
+/// 서버가 이전 계산을 재사용할 여지가 있다. 규약 부분은 코드가 갖고 사용자가 고칠 수 없다(바꾸면
+/// 결과를 문서에 넣는 흐름이 깨진다).
+fn build_system(format: DocFormat, has_caret: bool, has_tools: bool, custom_system: &str) -> String {
     let mut system = String::from(
         "당신은 HWP 문서 작성 도우미입니다. 사용자가 보낸 문서의 양식(제목/소제목/문단 구조)을 최대한 \
          준수하여, 사용자 요청에 맞는 내용을 한국어로 작성하세요.\n\
@@ -173,6 +178,11 @@ fn build_system(format: DocFormat, has_caret: bool, custom_system: &str) -> Stri
              - 답변은 {mark} 자리에 그대로 넣을 글만 씁니다. {mark} 표시는 답변에 넣지 않습니다.\n",
             mark = parse::CARET_MARK
         ));
+    }
+    if has_tools {
+        system.push_str(
+            "- 도구가 주어지면, 요청에 필요한 사실과 근거를 도구로 찾아 확인한 뒤 작성합니다. 도구를              부른 과정이나 출처 설명은 답변에 쓰지 않습니다.\n",
+        );
     }
     system
 }

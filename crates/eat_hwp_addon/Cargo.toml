@@ -32,8 +32,14 @@ anyhow = "1"
 # 기본 features의 rustls는 ring/aws-lc(C 코드)를 끌어와 i686-pc-windows-msvc 크로스 빌드에서
 # 실패하므로, Windows에서 schannel(순수 Rust)을 쓰는 native-tls로 교체한다.
 rig = { package = "rig-core", version = "0.44", default-features = false, features = ["derive", "reqwest", "native-tls"] }
-# rig는 async → sync LlmBackend::complete 내부에서 block_on하기 위한 런타임.
-tokio = { version = "1", features = ["rt-multi-thread"] }
+# rig는 async → sync LlmBackend::complete 내부에서 block_on하기 위한 런타임. time: MCP 연결·호출 시간 제한.
+tokio = { version = "1", features = ["rt-multi-thread", "time"] }
+# MCP 클라이언트: 로컬 프로그램(stdio)과 네트워크 서버(Streamable HTTP)에 붙는다. rig-rmcp 0.44는 rmcp 2와
+# rig-agent를 끌어오므로 쓰지 않고, 도구 호출 반복은 llm 모듈이 rig 완성 API로 직접 돈다.
+# rustls(C 코드)를 피하려 native-tls를 쓴다.
+rmcp = { version = "3.8", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest-native-tls"] }
+# MCP 도구 인자·스키마.
+serde_json = "1"
 # GUI(gui)와 자기 DLL 경로 조회(kernel: GetModuleHandle/GetModuleFileName의 safe 래퍼).
 winsafe = { version = "0.0.29", features = ["gui", "kernel"] }
 

@@ -28,14 +28,16 @@
 //! - 모델 칸(목록에서 고르거나 직접 입력)과 "상태 확인" 버튼, 상태 줄. 상태 확인과 키·주소 칸에서 나갈
 //!   때의 점검은 설정 창 안에서만 보이고, "확인"을 눌러야 메인 창에 적용된다
 //! - LLM에 보낼 문서 형식(평문 / HWPML 원문 / HWPX→Markdown / SaveAs HWPML 파일)
+//! - MCP 서버 칸(`settings`의 `mcp_servers.txt`, 형식은 `mcp::parse_servers`)과 "MCP 확인" 버튼
 //! - 고정 프롬프트(코드가 정한 규약, 읽기 전용, 고른 형식 기준)와 사용자 지정 지침 칸
 //!   (`settings`의 `system_prompt.txt`)
-//! - "확인"은 사용자 지정 지침과 서버 주소·모델·형식(`settings`의 `settings.txt`)을 파일에 쓰고 적용한다.
+//! - "확인"은 사용자 지정 지침, 서버 주소·모델·형식(`settings.txt`), MCP 서버를 파일에 쓰고 적용한다.
 //!   키는 저장하지 않고 이번 실행에만 쓴다. "취소"는 바꾼 값을 버린다
 //!
 //! 창을 열 때 `settings.txt`의 서버 주소·모델·형식을 읽어 적용한다.
 //!
-//! LLM에는 항상 문서 전체를 커서 위치 표시와 함께 보낸다. 답은 받기만 하고, 문서에는 "커서 위치에
+//! LLM에는 항상 문서 전체를 커서 위치 표시와 함께 보낸다. MCP 서버가 있으면 그 도구도 주고, 부른 도구
+//! 기록(`⚙ …`)은 대화 칸의 답 앞에 보인다(문서에는 답만 넣는다). 답은 받기만 하고, 문서에는 "커서 위치에
 //! 삽입" 버튼을 눌러야 넣는다(`hwp::insert_into`).
 //!
 //! 문서 내용은 `hwp` 모듈이 실행 중인 한글에서 `GetTextFile`(HWPML2X)로 읽어 온다. 한글 없이
@@ -44,8 +46,9 @@
 use crate::chat_store;
 use crate::config::{Config, Provider};
 use crate::hwp::{self, DocContent, DocSnapshot};
-use crate::llm::{self, LlmBackend, RigBackend, ServerState, ServerStatus};
+use crate::llm::{self, Completion, RigBackend, ServerState, ServerStatus};
 use crate::markdown;
+use crate::mcp;
 use crate::settings;
 use crate::workflow::{self, DocFormat};
 use anyhow::{Result, anyhow};
@@ -119,6 +122,9 @@ struct Session {
 struct SettingsUi {
     cmb_model: gui::ComboBox,
     lbl_status: gui::Label,
+    /// MCP 서버 점검 결과 줄과 "MCP 확인" 버튼.
+    lbl_mcp_status: gui::Label,
+    btn_mcp_check: gui::Button,
 }
 
 /// 서버 점검 결과를 보일 곳.
@@ -492,21 +498,34 @@ impl MainWindow {
                         Ok(())
                     });
                 }
-                // 키가 실행마다 달라질 수 있어 백엔드는 실행할 때 만든다.
                 // 답을 넣을 원래 문서.
                 let origin = doc.as_ref().ok().and_then(|d| d.origin.clone());
+                // 설정 창에서 저장한 내용이 바로 반영되도록 요청마다 읽는다.
+                let custom_system = settings::load_custom_system_prompt();
+                let (mcp_servers, mcp_errors) =
+                    mcp::parse_servers(&settings::load_mcp_servers_text());
+                if !mcp_errors.is_empty() {
+                    tracing::warn!(?mcp_errors, "MCP 설정에 잘못된 줄이 있어 건너뜀");
+                }
+                // 키가 실행마다 달라질 수 있어 백엔드는 실행할 때 만든다.
                 let result = doc.and_then(|doc| {
-                    RigBackend::new(&cfg)
-                        .and_then(|backend| {
-                            // 설정 창에서 저장한 내용이 바로 반영되도록 요청마다 읽는다.
-                            let custom_system = settings::load_custom_system_prompt();
-                            run_workflow(&cfg, &backend, &doc, format, &user_prompt, &custom_system)
-                        })
+                    RigBackend::new(&cfg).and_then(|backend| {
+                        workflow::run_prompt(
+                            &cfg,
+                            &backend,
+                            &doc.content,
+                            format,
+                            &user_prompt,
+                            &custom_system,
+                            &mcp_servers,
+                        )
+                    })
                 });
                 match &result {
                     Ok(answer) => tracing::info!(
                         elapsed_ms = started.elapsed().as_millis(),
-                        answer_chars = answer.chars().count(),
+                        answer_chars = answer.text.chars().count(),
+                        tool_log = answer.log.len(),
                         "응답 받음"
                     ),
                     Err(e) => tracing::warn!(
@@ -841,7 +860,7 @@ fn insert_answer(answer: &str, origin: Option<&hwp::DocIdentity>) -> String {
 fn finish_on_ui(
     wnd: &gui::WindowMain,
     header: &str,
-    result: Result<String>,
+    result: Result<Completion>,
     origin: Option<hwp::DocIdentity>,
 ) {
     if let Ok(btn) = wnd.hwnd().GetDlgItem(ID_BTN_RUN) {
@@ -850,14 +869,19 @@ fn finish_on_ui(
     if let Ok(answer) = &result {
         with_ui(|ui| {
             ui.answer = Some(Answer {
-                text: answer.clone(),
+                text: answer.text.clone(),
                 origin,
             });
             ui.btn_insert.hwnd().EnableWindow(true);
         });
     }
     match result {
-        Ok(answer) => chat_finish(header, &answer),
+        // MCP 도구 기록은 답 앞에 보인다. 문서에는 답만 넣는다.
+        Ok(answer) if answer.log.is_empty() => chat_finish(header, &answer.text),
+        Ok(answer) => chat_finish(
+            header,
+            &format!("{}\n\n{}", answer.log.join("\n"), answer.text),
+        ),
         Err(e) => chat_finish("◀ 오류", &format!("{e:#}")),
     }
     chat_save();
@@ -1014,24 +1038,20 @@ fn to_crlf(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\n', "\r\n")
 }
 
-/// 확보한 문서 내용으로 워크플로를 실행한다.
-fn run_workflow(
-    cfg: &Config,
-    backend: &dyn LlmBackend,
-    doc: &DocSnapshot,
-    format: DocFormat,
-    user_prompt: &str,
-    custom_system: &str,
-) -> Result<String> {
-    workflow::run_prompt(cfg, backend, &doc.content, format, user_prompt, custom_system)
+/// 설정 창의 고정 프롬프트 제목.
+fn fixed_prompt_title(format: DocFormat, has_tools: bool) -> String {
+    format!(
+        "고정 프롬프트 — 코드가 정한 규약, 고칠 수 없음 (형식: {}, 커서 표시{} 있을 때)",
+        format.short(),
+        if has_tools { "·MCP 도구가" } else { "가" }
+    )
 }
 
-/// 설정 창의 고정 프롬프트 제목.
-fn fixed_prompt_title(format: DocFormat) -> String {
-    format!(
-        "고정 프롬프트 — 코드가 정한 규약, 고칠 수 없음 (형식: {}, 커서 표시가 있을 때)",
-        format.short()
-    )
+/// 설정 창의 고정 프롬프트 칸과 제목을 `format`과 MCP 칸의 서버 유무에 맞게 다시 쓴다.
+fn show_fixed_prompt(lbl: &gui::Label, txt: &gui::Edit, format: DocFormat, mcp_text: &str) {
+    let has_tools = !mcp::parse_servers(mcp_text).0.is_empty();
+    let _ = lbl.hwnd().SetWindowText(&fixed_prompt_title(format, has_tools));
+    let _ = txt.set_text(&to_crlf(&workflow::system_preview(format, has_tools)));
 }
 
 /// 문서 형식 칸에서 고른 형식. 고른 것이 없으면 기본 형식.
@@ -1042,11 +1062,17 @@ fn selected_format(cmb: &gui::ComboBox) -> DocFormat {
         .unwrap_or(DocFormat::DEFAULT)
 }
 
-/// 설정 창(모달). LLM 연결(키·서버 주소·모델·상태 확인), 보낼 문서 형식, 시스템 프롬프트를 고친다.
+/// MCP 서버 칸이 비었을 때 보일 설명(주석 줄이라 서버로 읽지 않는다).
+const MCP_TEMPLATE: &str = "# 한 줄에 서버 하나: 이름 = 주소 또는 명령. #으로 시작하는 줄은 쓰지 않는다.\n\
+# 네트워크 서버(Streamable HTTP):  docs = http://192.168.0.10:8000/mcp\n\
+# 로컬 프로그램(stdio):            hwp2md = \"C:\\tools\\hwp2md-mcp.exe\" --root C:\\참고문서\n";
+
+/// 설정 창(모달). 왼쪽은 LLM 연결(키·서버 주소·모델·상태 확인)·보낼 문서 형식·MCP 서버, 오른쪽은
+/// 시스템 프롬프트(고정 규약 보기, 사용자 지정 지침)다.
 ///
-/// "확인"을 누르면 사용자 지정 지침과 서버 주소·모델·형식을 파일에 쓰고 적용한다. 키는 저장하지 않고
-/// 이번 실행에만 쓴다. 키·주소·모델이 바뀌었으면 메인 창의 상태를 다시 점검한다. "취소"는 바꾼 값을
-/// 버린다.
+/// "확인"을 누르면 사용자 지정 지침·서버 주소·모델·형식·MCP 서버를 파일에 쓰고 적용한다. 키는 저장하지
+/// 않고 이번 실행에만 쓴다. 키·주소·모델이 바뀌었으면 메인 창의 상태를 다시 점검한다. MCP 칸에 잘못된
+/// 줄이 있으면 알리고 닫지 않는다. "취소"는 바꾼 값을 버린다.
 fn open_settings(parent: &gui::WindowMain) {
     let Some((base, session, main_status)) = with_ui(|ui| {
         (
@@ -1060,11 +1086,11 @@ fn open_settings(parent: &gui::WindowMain) {
 
     let dlg = gui::WindowModal::new(gui::WindowModalOpts {
         title: "설정",
-        size: gui::dpi(520, 642),
+        size: gui::dpi(1040, 604),
         ..Default::default()
     });
 
-    // ── LLM 연결 ──
+    // ── 왼쪽: LLM 연결 ──
     let _lbl_key = gui::Label::new(
         &dlg,
         gui::LabelOpts {
@@ -1167,12 +1193,62 @@ fn open_settings(parent: &gui::WindowMain) {
         },
     );
 
-    // ── 시스템 프롬프트 ──
+    // ── 왼쪽: MCP 서버 ──
+    let _lbl_mcp = gui::Label::new(
+        &dlg,
+        gui::LabelOpts {
+            text: "MCP 서버 — 한 줄에 하나: 이름 = http(s)://주소 또는 실행 명령 (#은 꺼짐)",
+            position: gui::dpi(10, 212),
+            size: gui::dpi(500, 16),
+            ..Default::default()
+        },
+    );
+    let txt_mcp = gui::Edit::new(
+        &dlg,
+        gui::EditOpts {
+            position: gui::dpi(10, 230),
+            width: gui::dpi_x(500),
+            height: gui::dpi_y(272),
+            control_style: co::ES::MULTILINE
+                | co::ES::WANTRETURN
+                | co::ES::AUTOVSCROLL
+                | co::ES::AUTOHSCROLL
+                | co::ES::NOHIDESEL,
+            window_style: co::WS::CHILD
+                | co::WS::VISIBLE
+                | co::WS::TABSTOP
+                | co::WS::GROUP
+                | co::WS::VSCROLL
+                | co::WS::HSCROLL,
+            ..Default::default()
+        },
+    );
+    let btn_mcp_check = gui::Button::new(
+        &dlg,
+        gui::ButtonOpts {
+            text: "MCP 확인",
+            position: gui::dpi(10, 512),
+            width: gui::dpi_x(110),
+            ..Default::default()
+        },
+    );
+    let lbl_mcp_status = gui::Label::new(
+        &dlg,
+        gui::LabelOpts {
+            text: "MCP: 확인 전 (요청할 때마다 붙고, 끝나면 닫는다)",
+            position: gui::dpi(130, 510),
+            // 서버마다 결과를 이어 적으므로 두 줄 높이로 둔다.
+            size: gui::dpi(380, 48),
+            ..Default::default()
+        },
+    );
+
+    // ── 오른쪽: 시스템 프롬프트 ──
     let lbl_fixed = gui::Label::new(
         &dlg,
         gui::LabelOpts {
-            text: &fixed_prompt_title(session.format),
-            position: gui::dpi(10, 210),
+            text: "",
+            position: gui::dpi(530, 10),
             size: gui::dpi(500, 16),
             ..Default::default()
         },
@@ -1180,9 +1256,9 @@ fn open_settings(parent: &gui::WindowMain) {
     let txt_fixed = gui::Edit::new(
         &dlg,
         gui::EditOpts {
-            position: gui::dpi(10, 228),
+            position: gui::dpi(530, 28),
             width: gui::dpi_x(500),
-            height: gui::dpi_y(170),
+            height: gui::dpi_y(250),
             control_style: co::ES::MULTILINE | co::ES::AUTOVSCROLL | co::ES::READONLY,
             window_style: co::WS::CHILD
                 | co::WS::VISIBLE
@@ -1196,16 +1272,16 @@ fn open_settings(parent: &gui::WindowMain) {
         &dlg,
         gui::LabelOpts {
             text: "사용자 지정 지침 — 위 규약 안의 표시된 자리에 들어갑니다. 비우면 붙이지 않습니다.",
-            position: gui::dpi(10, 408),
+            position: gui::dpi(530, 290),
             ..Default::default()
         },
     );
     let txt_custom = gui::Edit::new(
         &dlg,
         gui::EditOpts {
-            position: gui::dpi(10, 426),
+            position: gui::dpi(530, 308),
             width: gui::dpi_x(500),
-            height: gui::dpi_y(170),
+            height: gui::dpi_y(250),
             control_style: co::ES::MULTILINE
                 | co::ES::WANTRETURN
                 | co::ES::AUTOVSCROLL
@@ -1222,7 +1298,7 @@ fn open_settings(parent: &gui::WindowMain) {
         &dlg,
         gui::ButtonOpts {
             text: "확인",
-            position: gui::dpi(330, 608),
+            position: gui::dpi(850, 570),
             width: gui::dpi_x(85),
             ..Default::default()
         },
@@ -1231,7 +1307,7 @@ fn open_settings(parent: &gui::WindowMain) {
         &dlg,
         gui::ButtonOpts {
             text: "취소",
-            position: gui::dpi(425, 608),
+            position: gui::dpi(945, 570),
             width: gui::dpi_x(85),
             ..Default::default()
         },
@@ -1243,6 +1319,10 @@ fn open_settings(parent: &gui::WindowMain) {
         let txt_url = txt_url.clone();
         let cmb_model = cmb_model.clone();
         let lbl_status = lbl_status.clone();
+        let txt_mcp = txt_mcp.clone();
+        let lbl_mcp_status = lbl_mcp_status.clone();
+        let btn_mcp_check = btn_mcp_check.clone();
+        let lbl_fixed = lbl_fixed.clone();
         let txt_fixed = txt_fixed.clone();
         let txt_custom = txt_custom.clone();
         let session = session.clone();
@@ -1251,28 +1331,92 @@ fn open_settings(parent: &gui::WindowMain) {
             let _ = txt_url.set_text(&session.base_url);
             fill_combo(&cmb_model, &session.models, &session.model);
             let _ = lbl_status.hwnd().SetWindowText(&main_status);
-            let _ = txt_fixed.set_text(&to_crlf(&workflow::system_preview(session.format)));
+            txt_mcp.limit_text(None);
+            let mcp_text = settings::load_mcp_servers_text();
+            let mcp_text = if mcp_text.trim().is_empty() {
+                MCP_TEMPLATE.to_string()
+            } else {
+                mcp_text
+            };
+            let _ = txt_mcp.set_text(&to_crlf(&mcp_text));
+            show_fixed_prompt(&lbl_fixed, &txt_fixed, session.format, &mcp_text);
             txt_custom.limit_text(None);
             let _ = txt_custom.set_text(&to_crlf(&settings::load_custom_system_prompt()));
             with_ui(|ui| {
                 ui.settings = Some(SettingsUi {
                     cmb_model: cmb_model.clone(),
                     lbl_status: lbl_status.clone(),
+                    lbl_mcp_status: lbl_mcp_status.clone(),
+                    btn_mcp_check: btn_mcp_check.clone(),
                 })
             });
             Ok(0)
         });
     }
 
-    // 형식을 바꾸면 고정 프롬프트도 그 형식으로 다시 보인다.
+    // 형식을 바꾸거나 MCP 칸을 고치면 고정 프롬프트도 그에 맞게 다시 보인다(MCP 서버가 있으면 도구
+    // 규칙이 들어간다).
     {
         let cmb_format2 = cmb_format.clone();
+        let txt_mcp = txt_mcp.clone();
         let lbl_fixed = lbl_fixed.clone();
         let txt_fixed = txt_fixed.clone();
         cmb_format.on().cbn_sel_change(move || {
-            let format = selected_format(&cmb_format2);
-            let _ = lbl_fixed.hwnd().SetWindowText(&fixed_prompt_title(format));
-            let _ = txt_fixed.set_text(&to_crlf(&workflow::system_preview(format)));
+            let mcp_text = txt_mcp.text().unwrap_or_default();
+            show_fixed_prompt(&lbl_fixed, &txt_fixed, selected_format(&cmb_format2), &mcp_text);
+            Ok(())
+        });
+    }
+    {
+        let cmb_format = cmb_format.clone();
+        let txt_mcp2 = txt_mcp.clone();
+        let lbl_fixed = lbl_fixed.clone();
+        let txt_fixed = txt_fixed.clone();
+        txt_mcp.on().en_kill_focus(move || {
+            let mcp_text = txt_mcp2.text().unwrap_or_default();
+            show_fixed_prompt(&lbl_fixed, &txt_fixed, selected_format(&cmb_format), &mcp_text);
+            Ok(())
+        });
+    }
+
+    // MCP 확인: 칸에 적은 서버마다 붙어 도구 목록을 받아 본다(워커 스레드).
+    {
+        let parent = parent.clone();
+        let txt_mcp = txt_mcp.clone();
+        let btn_mcp_check2 = btn_mcp_check.clone();
+        btn_mcp_check.on().bn_clicked(move || {
+            let (servers, errors) = mcp::parse_servers(&txt_mcp.text().unwrap_or_default());
+            if !errors.is_empty() {
+                set_mcp_status(&format!("MCP: ✖ 잘못된 줄 — {}", errors.join(" / ")));
+                return Ok(());
+            }
+            if servers.is_empty() {
+                set_mcp_status("MCP: 서버 없음 — 도구 없이 요청한다");
+                return Ok(());
+            }
+            set_mcp_status(&format!("MCP: … 서버 {}개 확인 중", servers.len()));
+            btn_mcp_check2.hwnd().EnableWindow(false);
+            let wnd = parent.clone();
+            std::thread::spawn(move || {
+                let results = mcp::check_servers(&servers);
+                let text = results
+                    .iter()
+                    .map(|r| match &r.outcome {
+                        Ok(tools) => format!("{} ✔ 도구 {}개({}ms)", r.name, tools.len(), r.elapsed_ms),
+                        Err(e) => format!("{} ✖ {e}", r.name),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" · ");
+                wnd.run_ui_thread(move || {
+                    set_mcp_status(&format!("MCP: {text}"));
+                    with_ui(|ui| {
+                        if let Some(s) = &ui.settings {
+                            s.btn_mcp_check.hwnd().EnableWindow(true);
+                        }
+                    });
+                    Ok(())
+                });
+            });
             Ok(())
         });
     }
@@ -1320,6 +1464,22 @@ fn open_settings(parent: &gui::WindowMain) {
         let dlg2 = dlg.clone();
         let parent = parent.clone();
         btn_ok.on().bn_clicked(move || {
+            let mcp_text = txt_mcp.text().unwrap_or_default().replace("\r\n", "\n");
+            let (mcp_servers, mcp_errors) = mcp::parse_servers(&mcp_text);
+            if !mcp_errors.is_empty() {
+                let _ = dlg2.hwnd().MessageBox(
+                    &format!("MCP 서버 칸에 잘못된 줄이 있습니다.\n\n{}", mcp_errors.join("\n")),
+                    "설정 확인",
+                    co::MB::OK | co::MB::ICONWARNING,
+                );
+                return Ok(());
+            }
+            // 설명 줄만 있으면 저장하지 않는다(다음에 열 때 다시 보인다).
+            let mcp_to_save = if mcp_text.trim() == MCP_TEMPLATE.trim() {
+                ""
+            } else {
+                mcp_text.as_str()
+            };
             let custom = txt_custom.text().unwrap_or_default();
             let key = txt_key.text().unwrap_or_default().trim().to_string();
             let saved = settings::GuiSettings {
@@ -1333,7 +1493,8 @@ fn open_settings(parent: &gui::WindowMain) {
                 format: Some(selected_format(&cmb_format)),
             };
             let written = settings::save_custom_system_prompt(&custom)
-                .and_then(|()| settings::save_gui_settings(&saved));
+                .and_then(|()| settings::save_gui_settings(&saved))
+                .and_then(|()| settings::save_mcp_servers_text(mcp_to_save));
             if let Err(e) = written {
                 tracing::warn!(error = %format!("{e:#}"), "설정 저장 실패");
                 let _ = dlg2.hwnd().MessageBox(
@@ -1360,6 +1521,7 @@ fn open_settings(parent: &gui::WindowMain) {
                 base_url = %saved.base_url,
                 model = %saved.model,
                 format = ?saved.format,
+                mcp_servers = mcp_servers.len(),
                 custom_chars = custom.trim().chars().count(),
                 "설정 저장·적용"
             );
@@ -1383,6 +1545,15 @@ fn open_settings(parent: &gui::WindowMain) {
     }
     // 창이 닫힌 뒤 도착한 점검 결과는 버린다.
     with_ui(|ui| ui.settings = None);
+}
+
+/// 설정 창의 MCP 상태 줄을 바꾼다(UI 스레드). 설정 창이 닫혀 있으면 버린다.
+fn set_mcp_status(text: &str) {
+    with_ui(|ui| {
+        if let Some(s) = &ui.settings {
+            let _ = s.lbl_mcp_status.hwnd().SetWindowText(text);
+        }
+    });
 }
 
 /// 고른 형식에 맞게 문서 내용과(가능하면) 커서 위치를 확보한다.
