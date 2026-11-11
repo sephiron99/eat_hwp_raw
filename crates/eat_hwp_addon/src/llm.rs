@@ -10,7 +10,7 @@
 use crate::config::{Config, Provider};
 use crate::mcp;
 use anyhow::{Result, anyhow, bail};
-use rig::completion::{CompletionRequest, CompletionResponse, Message, Reasoning};
+use rig::completion::{CompletionRequest, CompletionResponse, FinishReason, Message, Reasoning};
 use rig::message::{ToolCall, ToolChoice, ToolResultContent};
 use rig::driver::Model;
 use rig::error::ProviderError;
@@ -119,7 +119,7 @@ impl RigBackend {
             let response = self.call(request.clone()).await?;
             let calls: Vec<ToolCall> = response.tool_calls().cloned().collect();
             if calls.is_empty() {
-                return Ok(answer_text(&response));
+                return Ok(answer_text(&response, log));
             }
             if let Some(message) = response.message() {
                 request.chat_history.push(message);
@@ -166,20 +166,20 @@ impl LlmBackend for RigBackend {
             let request = CompletionRequest::new(user).preamble(system);
             let mut log = Vec::new();
             if mcp_servers.is_empty() {
-                let text = answer_text(&self.call(request).await?);
+                let text = answer_text(&self.call(request).await?, &mut log);
                 return Ok(Completion { text, log });
             }
             let hub = mcp::Hub::connect(mcp_servers).await;
             log.extend(hub.notes.iter().cloned());
             let result = if hub.is_empty() {
-                self.call(request).await.map(|r| answer_text(&r))
+                self.call(request).await.map(|r| answer_text(&r, &mut log))
             } else {
                 match self.complete_with_tools(request.clone(), &hub, &mut log).await {
                     // 도구를 받지 못하는 모델(Ollama: "does not support tools")은 도구 없이 다시 보낸다.
                     Err(e) if format!("{e:#}").to_ascii_lowercase().contains("support tools") => {
                         tracing::warn!(error = %format!("{e:#}"), "모델이 도구를 받지 않아 도구 없이 보냄");
                         log.push("⚠ 이 모델은 도구를 받지 않아 MCP 없이 보냄".to_string());
-                        self.call(request).await.map(|r| answer_text(&r))
+                        self.call(request).await.map(|r| answer_text(&r, &mut log))
                     }
                     other => other,
                 }
@@ -192,7 +192,22 @@ impl LlmBackend for RigBackend {
 
 /// 응답의 답 글. 추론을 꺼도 생각을 본문에 흘리고 `</think>`로 끝내는 로컬 모델이 있어(Ollama의
 /// qwen3에서 도구 결과를 받은 뒤 확인) 마지막 `</think>` 앞은 버린다.
-fn answer_text(response: &CompletionResponse) -> String {
+///
+/// 답이 길이 제한에서 끊겼으면 `log`에 알린다. 보낸 글이 서버의 컨텍스트보다 길면 Ollama는 앞부분을
+/// 잘라 내고 남은 자리만큼만 답을 쓰므로, 한두 글자만 오고 끊긴다(컨텍스트 4096에 6만 자를 보내 확인).
+fn answer_text(response: &CompletionResponse, log: &mut Vec<String>) -> String {
+    if response.finish_reason() == Some(FinishReason::Length) {
+        let input = response
+            .usage
+            .input_tokens
+            .map(|n| format!(" (입력 {n}토큰)"))
+            .unwrap_or_default();
+        tracing::warn!(usage = ?response.usage, "답이 길이 제한에서 끊김");
+        log.push(format!(
+            "⚠ 답이 길이 제한에서 끊겼습니다{input}. 보낸 글이 LLM 서버의 컨텍스트보다 길면 이렇게 됩니다. \
+             참고 문서를 줄이거나, 문서 형식을 평문으로 바꾸거나, 서버의 컨텍스트 길이를 늘리세요."
+        ));
+    }
     let text = response.text();
     match text.rfind("</think>") {
         Some(end) => text[end + "</think>".len()..].trim().to_string(),

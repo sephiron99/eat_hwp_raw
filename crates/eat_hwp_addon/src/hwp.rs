@@ -22,6 +22,18 @@ pub struct DocSnapshot {
     pub path: String,
     /// 읽은 문서. LLM이 쓴 글은 이 문서에만 넣는다. 한글에서 읽지 않았으면(`EAT_HWP_DOC`) `None`.
     pub origin: Option<DocIdentity>,
+    /// 한글에 함께 열려 있던 다른 문서들("다른 열린 문서도 함께 보내기"를 켰을 때). 참고용으로 보낸다.
+    pub others: Vec<OtherDoc>,
+    /// 다른 문서를 읽다가 생긴 알림(읽지 못한 문서 등). 대화 칸에 보인다.
+    pub other_notes: Vec<String>,
+}
+
+/// 원래 문서 말고 한글에 열려 있는 다른 문서 하나.
+#[derive(Clone, Debug)]
+pub struct OtherDoc {
+    /// 파일 이름. 저장하지 않은 문서는 `제목없음(ID n)`.
+    pub name: String,
+    pub content: DocContent,
 }
 
 /// 한글에 열린 문서 하나를 가리키는 값. 문서 ID(`DocumentID`)와 전체 경로(`FullName`)가 모두 같아야
@@ -99,6 +111,142 @@ pub fn insert_into(hwp: &HwpObject, origin: &DocIdentity, text: &str) -> Result<
     Ok(true)
 }
 
+impl DocIdentity {
+    /// 사람이 읽을 이름: 파일 이름. 저장하지 않은 문서는 `제목없음(ID n)`.
+    pub fn name(&self) -> String {
+        match std::path::Path::new(&self.full_name).file_name() {
+            Some(file) => file.to_string_lossy().into_owned(),
+            None => format!("제목없음(ID {})", self.id),
+        }
+    }
+}
+
+/// 활성 문서 말고 한글에 열려 있는 문서들("문서 고르기" 창의 목록).
+pub fn open_documents_except_active(hwp: &HwpObject) -> Result<Vec<DocIdentity>> {
+    let active = active_document(hwp)?;
+    let docs = hwp
+        .documents()
+        .map_err(|e| anyhow!("열린 문서 목록을 얻지 못함: {e}"))?;
+    let count = docs
+        .count()
+        .map_err(|e| anyhow!("열린 문서 수를 얻지 못함: {e}"))?;
+    Ok((0..count)
+        .filter_map(|i| docs.item(i).ok().and_then(|doc| identity(&doc).ok()))
+        .filter(|id| *id != active)
+        .collect())
+}
+
+/// 원래 문서(`origin`) 말고 한글에 열려 있는 문서를 읽는다. `picked`가 있으면 그 안의 문서만, 없으면
+/// 모두 읽는다. `markdown`이면 임시 HWPX로 저장해 hwp2md로 바꾸고, 아니면 `GetTextFile`(HWPML2X)로
+/// 읽는다. 읽지 못한 문서와, 골랐지만 지금 열려 있지 않은 문서는 빼고 알림에 남긴다.
+///
+/// 한글의 읽기 API는 활성 문서에만 통하므로 문서를 하나씩 활성화해 읽고, 끝나면 원래 문서를 다시
+/// 활성화한다(읽는 동안 한글 화면의 탭이 잠깐 바뀐다). 원래 문서로 돌아가지 못하면 오류다. 커서 책갈피를
+/// 넣지 않으므로 다른 문서의 내용과 수정 상태는 바뀌지 않는다.
+pub fn other_documents(
+    hwp: &HwpObject,
+    origin: &DocIdentity,
+    markdown: bool,
+    picked: Option<&[DocIdentity]>,
+) -> Result<(Vec<OtherDoc>, Vec<String>)> {
+    let docs = hwp
+        .documents()
+        .map_err(|e| anyhow!("열린 문서 목록을 얻지 못함: {e}"))?;
+    let count = docs
+        .count()
+        .map_err(|e| anyhow!("열린 문서 수를 얻지 못함: {e}"))?;
+    let mut others = Vec::new();
+    let mut notes = Vec::new();
+    let mut seen = Vec::new();
+    for i in 0..count {
+        let Ok(doc) = docs.item(i) else {
+            notes.push(format!("⚠ 열린 문서 {}번을 얻지 못함", i + 1));
+            continue;
+        };
+        let Ok(id) = identity(&doc) else {
+            notes.push(format!("⚠ 열린 문서 {}번의 정보를 얻지 못함", i + 1));
+            continue;
+        };
+        if id == *origin {
+            continue;
+        }
+        if picked.is_some_and(|picked| !picked.contains(&id)) {
+            continue;
+        }
+        let name = id.name();
+        seen.push(id.clone());
+        let read = doc
+            .set_active()
+            .map_err(|e| anyhow!("활성화 실패: {e}"))
+            .and_then(|()| match active_document(hwp)? == id {
+                true => Ok(()),
+                false => Err(anyhow!("활성화되지 않음")),
+            })
+            .and_then(|()| match markdown {
+                true => active_markdown(hwp),
+                false => active_hwpml(hwp),
+            });
+        match read {
+            Ok(content) => others.push(OtherDoc { name, content }),
+            Err(e) => {
+                tracing::warn!(doc = %name, error = %format!("{e:#}"), "다른 열린 문서를 읽지 못함");
+                notes.push(format!("⚠ 참고 문서 {name}을(를) 읽지 못함: {e:#}"));
+            }
+        }
+    }
+    for missing in picked
+        .unwrap_or_default()
+        .iter()
+        .filter(|id| **id != *origin && !seen.contains(id))
+    {
+        notes.push(format!("⚠ 고른 참고 문서 {}이(가) 열려 있지 않음", missing.name()));
+    }
+    // 원래 문서로 돌아간다. 답을 넣을 때 다시 확인하지만, 사용자가 보던 문서를 되돌려 놓아야 한다.
+    if active_document(hwp)? != *origin {
+        docs.find_item(origin.id)
+            .and_then(|doc| doc.set_active())
+            .map_err(|e| anyhow!("원래 문서로 돌아가지 못함: {e}"))?;
+        if active_document(hwp)? != *origin {
+            bail!("원래 문서로 돌아가지 못함");
+        }
+    }
+    Ok((others, notes))
+}
+
+/// 활성 문서를 `GetTextFile`(HWPML2X)로 읽는다. 커서 위치는 구하지 않는다(문서를 바꾸지 않음).
+fn active_hwpml(hwp: &HwpObject) -> Result<DocContent> {
+    let hwpml = hwp
+        .get_text_file(GetTextFileFormat::HwpMl2X, false)
+        .map_err(|e| anyhow!("GetTextFile(HWPML2X) 실패: {e}"))?;
+    if hwpml.is_empty() {
+        bail!("GetTextFile(HWPML2X)가 빈 문자열을 반환했습니다");
+    }
+    Ok(DocContent::Hwpml { hwpml, caret: None })
+}
+
+/// 활성 문서를 `SaveAs(경로, "HWPX", "lock:false")`로 임시 저장해 hwp2md로 Markdown으로 바꾼다.
+/// 커서 책갈피는 넣지 않는다(문서를 바꾸지 않음). 임시 파일은 [`document_hwpml_file`]과 같은 방법으로
+/// 지운다.
+fn active_markdown(hwp: &HwpObject) -> Result<DocContent> {
+    let file = std::env::temp_dir().join(format!(
+        "eat_hwp_raw_ref_{}_{}.hwpx",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default()
+    ));
+    let path = file
+        .to_str()
+        .ok_or_else(|| anyhow!("임시 파일 경로를 문자열로 바꿀 수 없음: {}", file.display()))?;
+    hwp.save_as(path, &FileFormat::HWPX, "lock:false")
+        .map_err(|e| anyhow!("SaveAs(HWPX) 실패: {e}"))?;
+    let _ = hwp.get_text_file(GetTextFileFormat::Text, false);
+    let md = crate::markdown::hwpx_to_markdown(&file, None);
+    let _ = std::fs::remove_file(&file);
+    Ok(DocContent::Markdown(md?))
+}
+
 /// 지금 커서 자리에 `text`를 넣는다(`ExtText::insert_with_shape`). 선택 블록이 있으면 블록을 지우고
 /// 그 자리에 넣는다.
 ///
@@ -133,6 +281,8 @@ pub fn document_snapshot(hwp: &HwpObject) -> Result<DocSnapshot> {
         },
         path: hwp.path().unwrap_or_default(),
         origin: None,
+        others: Vec::new(),
+        other_notes: Vec::new(),
     })
 }
 
@@ -174,6 +324,8 @@ pub fn document_hwpml_file(hwp: &HwpObject) -> Result<DocSnapshot> {
         content: DocContent::Hwpml { hwpml, caret: None },
         path: hwp.path().unwrap_or_default(),
         origin: None,
+        others: Vec::new(),
+        other_notes: Vec::new(),
     })
 }
 
@@ -214,6 +366,8 @@ pub fn document_markdown(hwp: &HwpObject) -> Result<DocSnapshot> {
         content: DocContent::Markdown(md),
         path: hwp.path().unwrap_or_default(),
         origin: None,
+        others: Vec::new(),
+        other_notes: Vec::new(),
     })
 }
 

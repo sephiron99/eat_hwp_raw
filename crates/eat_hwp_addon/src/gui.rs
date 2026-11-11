@@ -18,6 +18,9 @@
 //!   - 대화는 문서와 API 종류(로컬/OpenAI 호환, Claude)마다 `chat_store`가 정한 파일에 저장되고,
 //!     같은 문서·API로 돌아오면 다시 불러온다. 창을 열 때 한글의 현재 문서를, 요청을 보낼 때 읽은
 //!     문서를, 메인 창의 상태를 점검할 때 그 설정의 API 종류를 기준으로 바꾼다
+//! - "다른 열린 문서도 함께 보내기" 체크 칸: 켜면 한글에 열려 있는 다른 문서도 같은 형식으로 읽어 참고
+//!   문서로 함께 보낸다. 바꾸면 `settings.txt`에 남는다. "문서 고르기…" 버튼으로 보낼 문서를 고를 수
+//!   있다(고른 적이 없으면 모두 보낸다)
 //! - 프롬프트 입력 칸 + 보내기 버튼(Ctrl+Enter로도 보낸다). 보내면 입력 칸을 비운다. 처리완료
 //!   팝업은 없다
 //! - "커서 위치에 삽입" 버튼: 마지막으로 받은 답을 원래 문서(요청 때 읽은 문서)의 커서 자리에 넣고,
@@ -98,6 +101,12 @@ struct Ui {
     btn_insert: gui::Button,
     /// 마지막으로 받은 답. 보내기를 누르면 비운다.
     answer: Option<Answer>,
+    /// "다른 열린 문서도 함께 보내기" 체크 칸과 "문서 고르기…" 버튼.
+    chk_others: gui::CheckBox,
+    btn_pick: gui::Button,
+    /// "문서 고르기"에서 고른 문서. 고른 적이 없으면 `None`(열린 문서를 모두 보낸다). 한글의 문서 ID는
+    /// 한글을 다시 띄우면 달라지므로 저장하지 않는다.
+    picked_docs: Option<Vec<hwp::DocIdentity>>,
 }
 
 /// "커서 위치에 삽입"으로 넣을 답.
@@ -118,6 +127,8 @@ struct Session {
     /// 모델. 비우면 `EAT_HWP_LLM_MODEL` 설정대로 실행한다.
     model: String,
     format: DocFormat,
+    /// 한글에 열려 있는 다른 문서도 참고 문서로 함께 보낼지(메인 창의 체크 칸).
+    include_open_docs: bool,
     /// 메인 창의 마지막 점검에서 받은 모델 목록. 설정 창의 모델 칸 목록으로 쓴다.
     models: Vec<String>,
 }
@@ -174,6 +185,8 @@ pub struct MainWindow {
     btn_settings: gui::Button,
     btn_manual: gui::Button,
     btn_insert: gui::Button,
+    chk_others: gui::CheckBox,
+    btn_pick: gui::Button,
 }
 
 impl MainWindow {
@@ -245,6 +258,25 @@ impl MainWindow {
                 position: gui::dpi(400, 436),
                 resize_behavior: (gui::Horz::Repos, gui::Vert::Repos),
                 width: gui::dpi_x(110),
+                ..Default::default()
+            },
+        );
+        let chk_others = gui::CheckBox::new(
+            &wnd,
+            gui::CheckBoxOpts {
+                text: "다른 열린 문서도 함께 보내기",
+                position: gui::dpi(215, 384),
+                resize_behavior: (gui::Horz::None, gui::Vert::Repos),
+                ..Default::default()
+            },
+        );
+        let btn_pick = gui::Button::new(
+            &wnd,
+            gui::ButtonOpts {
+                text: "문서 고르기…",
+                position: gui::dpi(410, 379),
+                resize_behavior: (gui::Horz::None, gui::Vert::Repos),
+                width: gui::dpi_x(100),
                 ..Default::default()
             },
         );
@@ -345,11 +377,15 @@ impl MainWindow {
                     base_url: saved.base_url,
                     model: saved.model,
                     format: saved.format.unwrap_or(DocFormat::DEFAULT),
+                    include_open_docs: saved.include_open_docs,
                     models: Vec::new(),
                 },
                 settings: None,
                 btn_insert: btn_insert.clone(),
                 answer: None,
+                chk_others: chk_others.clone(),
+                btn_pick: btn_pick.clone(),
+                picked_docs: None,
             })
         });
 
@@ -365,6 +401,8 @@ impl MainWindow {
             btn_settings,
             btn_manual,
             btn_insert,
+            chk_others,
+            btn_pick,
         };
         new_self.events();
         new_self
@@ -384,10 +422,12 @@ impl MainWindow {
         {
             let wnd2 = wnd.clone();
             let txt_chat = self.txt_chat.clone();
+            let chk_others = self.chk_others.clone();
             self.wnd.on().wm_create(move |_| {
                 // 여러 차례 쌓여도 잘리지 않게 글자 수 제한을 최대로 둔다(기본은 약 3만 자).
                 txt_chat.limit_text(None);
                 if let Some(cfg) = with_ui(|ui| {
+                    chk_others.set_check(ui.session.include_open_docs);
                     ui.btn_insert.hwnd().EnableWindow(false);
                     update_summary(ui);
                     check_cfg(ui)
@@ -405,6 +445,61 @@ impl MainWindow {
             p.info.ptMinTrackSize = winsafe::POINT::with(w, h);
             Ok(())
         });
+
+        // 다른 열린 문서도 함께 보내기: 바꾸면 바로 적용하고 설정 파일에 남긴다.
+        {
+            let chk_others = self.chk_others.clone();
+            self.chk_others.on().bn_clicked(move || {
+                let saved = with_ui(|ui| {
+                    ui.session.include_open_docs = chk_others.is_checked();
+                    // 하나도 고르지 않은 채 다시 켜면 보낼 문서가 없으므로 모두 보내는 것으로 되돌린다.
+                    if ui.picked_docs.as_ref().is_some_and(|picked| picked.is_empty()) {
+                        ui.picked_docs = None;
+                    }
+                    settings::save_gui_settings(&session_settings(&ui.session))
+                });
+                if let Some(Err(e)) = saved {
+                    tracing::warn!(error = %format!("{e:#}"), "설정 저장 실패");
+                }
+                Ok(())
+            });
+        }
+
+        // 문서 고르기: 워커 스레드에서 한글의 열린 문서 목록을 받아, UI 스레드에서 고르는 창을 연다.
+        {
+            let wnd2 = wnd.clone();
+            let btn_pick = self.btn_pick.clone();
+            self.btn_pick.on().bn_clicked(move || {
+                btn_pick.hwnd().EnableWindow(false);
+                let wnd = wnd2.clone();
+                std::thread::spawn(move || {
+                    let docs = hwp::connect().and_then(|hwp| hwp::open_documents_except_active(&hwp));
+                    let wnd_ui = wnd.clone();
+                    wnd.run_ui_thread(move || {
+                        with_ui(|ui| ui.btn_pick.hwnd().EnableWindow(true));
+                        match docs {
+                            Ok(docs) if docs.is_empty() => {
+                                let _ = wnd_ui.hwnd().MessageBox(
+                                    "한글에 열려 있는 다른 문서가 없습니다.",
+                                    "문서 고르기",
+                                    co::MB::OK | co::MB::ICONINFORMATION,
+                                );
+                            }
+                            Ok(docs) => pick_documents(&wnd_ui, docs),
+                            Err(e) => {
+                                let _ = wnd_ui.hwnd().MessageBox(
+                                    &format!("{e:#}"),
+                                    "문서 고르기",
+                                    co::MB::OK | co::MB::ICONERROR,
+                                );
+                            }
+                        }
+                        Ok(())
+                    });
+                });
+                Ok(())
+            });
+        }
 
         // 설명서 창.
         {
@@ -471,7 +566,14 @@ impl MainWindow {
             let user_prompt = txt_prompt.text().unwrap_or_default();
             // 설정 창에서 키를 입력했으면 Claude API로, 비웠으면 환경 변수 설정대로 실행한다.
             // 모델이 비어 있지 않으면 그 모델을 쓴다.
-            let Some((cfg, format)) = with_ui(|ui| (session_cfg(ui), ui.session.format)) else {
+            let Some((cfg, format, include_open_docs, picked_docs)) = with_ui(|ui| {
+                (
+                    session_cfg(ui),
+                    ui.session.format,
+                    ui.session.include_open_docs,
+                    ui.picked_docs.clone(),
+                )
+            }) else {
                 return Ok(());
             };
 
@@ -499,7 +601,7 @@ impl MainWindow {
                 let started = Instant::now();
                 // 창을 연 뒤에 서버가 켜진 경우 등, 서버에 없는 모델이 설정에 남아 있을 수 있다.
                 let cfg = preflight_model(cfg, &wnd);
-                let doc = acquire_document(format);
+                let doc = acquire_document(format, include_open_docs, picked_docs.as_deref());
                 match &doc {
                     Ok(d) => tracing::info!(
                         ?format,
@@ -525,6 +627,8 @@ impl MainWindow {
                 }
                 // 답을 넣을 원래 문서.
                 let origin = doc.as_ref().ok().and_then(|d| d.origin.clone());
+                // 함께 보낸 다른 열린 문서를 대화 칸에 알린다.
+                let reference_notes = doc.as_ref().map(reference_notes).unwrap_or_default();
                 // 설정 창에서 저장한 내용이 바로 반영되도록 요청마다 읽는다.
                 let custom_system = settings::load_custom_system_prompt();
                 let (mcp_servers, mcp_errors) =
@@ -543,8 +647,13 @@ impl MainWindow {
                             &user_prompt,
                             &custom_system,
                             &mcp_servers,
+                            &doc.others,
                         )
                     })
+                });
+                let result = result.map(|mut answer| {
+                    answer.log.splice(0..0, reference_notes);
+                    answer
                 });
                 match &result {
                     Ok(answer) => tracing::info!(
@@ -606,6 +715,38 @@ fn effective_cfg(base: &Arc<Config>, api_key: &str, base_url: &str, model: &str)
         cfg = cfg.with_model(model.trim());
     }
     Arc::new(cfg)
+}
+
+/// 설정 파일(`settings.txt`)에 쓸 값.
+fn session_settings(session: &Session) -> settings::GuiSettings {
+    settings::GuiSettings {
+        base_url: session.base_url.clone(),
+        model: session.model.clone(),
+        format: Some(session.format),
+        include_open_docs: session.include_open_docs,
+    }
+}
+
+/// 함께 보낸 다른 열린 문서를 대화 칸에 알릴 줄(`📎 참고 문서 …`)과 읽지 못한 문서 알림.
+fn reference_notes(doc: &DocSnapshot) -> Vec<String> {
+    let mut notes = doc.other_notes.clone();
+    if !doc.others.is_empty() {
+        let names: Vec<&str> = doc.others.iter().map(|d| d.name.as_str()).collect();
+        let target = doc
+            .origin
+            .as_ref()
+            .map(|origin| origin.name())
+            .unwrap_or_else(|| "제목없음".to_string());
+        notes.insert(
+            0,
+            format!(
+                "📄 대상 문서: {target}\n📎 참고 문서 {}개: {}",
+                names.len(),
+                names.join(", ")
+            ),
+        );
+    }
+    notes
 }
 
 /// 적용된 설정으로 요청할 때의 설정.
@@ -952,6 +1093,7 @@ fn chat_set_context(doc_path: Option<String>, provider: Provider) {
         }
         chat.doc_path = doc_path;
         chat.provider = provider;
+        show_target_document(chat.doc_path.as_deref());
         let file = chat
             .doc_path
             .as_deref()
@@ -969,6 +1111,26 @@ fn chat_set_context(doc_path: Option<String>, provider: Provider) {
         let _ = chat.log.set_text(&to_crlf(&text));
         // 끝으로 스크롤한다.
         chat_append(&chat.log, "");
+    });
+}
+
+/// 메인 창의 제목에 대상 문서(답을 넣을 원래 문서)의 이름을 보인다(UI 스레드). 함께 보내는 참고 문서와
+/// 가려 볼 수 있게 한다. 저장하지 않은 문서는 `제목없음`, 문서를 아직 모르면 프로그램 이름만 보인다.
+fn show_target_document(doc_path: Option<&str>) {
+    let title = match doc_path {
+        None => "eat_hwp_raw — HWP AI Agent".to_string(),
+        Some(path) => {
+            let name = std::path::Path::new(path)
+                .file_name()
+                .map(|file| file.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "제목없음".to_string());
+            format!("eat_hwp_raw — 대상 문서: {name}")
+        }
+    };
+    with_ui(|ui| {
+        if let Ok(main) = ui.status.hwnd().GetParent() {
+            let _ = main.SetWindowText(&title);
+        }
     });
 }
 
@@ -1063,6 +1225,122 @@ fn to_crlf(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\n', "\r\n")
 }
 
+/// "문서 고르기" 창에 보일 문서의 최대 개수.
+const MAX_PICK_DOCS: usize = 20;
+
+/// 문서 고르기 창(모달). 한글에 열려 있는 다른 문서(`docs`)마다 체크 칸을 두고, 참고 문서로 함께 보낼
+/// 문서를 고른다.
+///
+/// 처음에는 지난번에 고른 문서가(고른 적이 없으면 모두) 체크돼 있다. "확인"을 누르면 고른 문서를
+/// 기억하고, 하나라도 골랐으면 "다른 열린 문서도 함께 보내기"를 켜고 하나도 없으면 끈다.
+fn pick_documents(parent: &gui::WindowMain, docs: Vec<hwp::DocIdentity>) {
+    let picked = with_ui(|ui| ui.picked_docs.clone()).flatten();
+    let shown = docs.len().min(MAX_PICK_DOCS);
+    let rows = shown as i32;
+    let dlg = gui::WindowModal::new(gui::WindowModalOpts {
+        title: "참고 문서 고르기",
+        size: gui::dpi(560, 86 + rows * 24),
+        ..Default::default()
+    });
+    let hint = if docs.len() > shown {
+        format!("함께 보낼 문서를 고르세요. (열린 문서 {}개 중 {shown}개만 보임)", docs.len())
+    } else {
+        "함께 보낼 문서를 고르세요. 글은 원래 문서에만 넣습니다.".to_string()
+    };
+    let _lbl = gui::Label::new(
+        &dlg,
+        gui::LabelOpts {
+            text: &hint,
+            position: gui::dpi(10, 10),
+            ..Default::default()
+        },
+    );
+    let checks: Vec<(gui::CheckBox, hwp::DocIdentity)> = docs
+        .into_iter()
+        .take(shown)
+        .enumerate()
+        .map(|(i, doc)| {
+            // 같은 이름의 문서를 가릴 수 있게 저장된 문서는 전체 경로를 보인다.
+            let text = if doc.full_name.is_empty() {
+                doc.name()
+            } else {
+                doc.full_name.clone()
+            };
+            let check = gui::CheckBox::new(
+                &dlg,
+                gui::CheckBoxOpts {
+                    text: &text,
+                    position: gui::dpi(10, 36 + i as i32 * 24),
+                    size: gui::dpi(540, 20),
+                    control_style: co::BS::AUTOCHECKBOX,
+                    ..Default::default()
+                },
+            );
+            (check, doc)
+        })
+        .collect();
+    let btn_ok = gui::Button::new(
+        &dlg,
+        gui::ButtonOpts {
+            text: "확인",
+            position: gui::dpi(370, 50 + rows * 24),
+            width: gui::dpi_x(85),
+            ..Default::default()
+        },
+    );
+    let btn_cancel = gui::Button::new(
+        &dlg,
+        gui::ButtonOpts {
+            text: "취소",
+            position: gui::dpi(465, 50 + rows * 24),
+            width: gui::dpi_x(85),
+            ..Default::default()
+        },
+    );
+    {
+        let checks = checks.clone();
+        dlg.on().wm_create(move |_| {
+            for (check, doc) in &checks {
+                check.set_check(picked.as_ref().is_none_or(|picked| picked.contains(doc)));
+            }
+            Ok(0)
+        });
+    }
+    {
+        let dlg2 = dlg.clone();
+        btn_ok.on().bn_clicked(move || {
+            let chosen: Vec<hwp::DocIdentity> = checks
+                .iter()
+                .filter(|(check, _)| check.is_checked())
+                .map(|(_, doc)| doc.clone())
+                .collect();
+            let saved = with_ui(|ui| {
+                let include = !chosen.is_empty();
+                tracing::info!(picked = chosen.len(), "참고 문서 고름");
+                ui.picked_docs = Some(chosen);
+                ui.session.include_open_docs = include;
+                ui.chk_others.set_check(include);
+                settings::save_gui_settings(&session_settings(&ui.session))
+            });
+            if let Some(Err(e)) = saved {
+                tracing::warn!(error = %format!("{e:#}"), "설정 저장 실패");
+            }
+            dlg2.close();
+            Ok(())
+        });
+    }
+    {
+        let dlg2 = dlg.clone();
+        btn_cancel.on().bn_clicked(move || {
+            dlg2.close();
+            Ok(())
+        });
+    }
+    if let Err(e) = dlg.show_modal(parent) {
+        tracing::warn!(error = %e, "문서 고르기 창을 열지 못함");
+    }
+}
+
 /// 설명서 창(모달). 사용자 설명서([`MANUAL`])를 읽기 전용 칸에 보인다.
 fn open_manual(parent: &gui::WindowMain) {
     let dlg = gui::WindowModal::new(gui::WindowModalOpts {
@@ -1126,8 +1404,10 @@ fn fixed_prompt_title(format: DocFormat, has_tools: bool) -> String {
 /// 설정 창의 고정 프롬프트 칸과 제목을 `format`과 MCP 칸의 서버 유무에 맞게 다시 쓴다.
 fn show_fixed_prompt(lbl: &gui::Label, txt: &gui::Edit, format: DocFormat, mcp_text: &str) {
     let has_tools = !mcp::parse_servers(mcp_text).0.is_empty();
+    // 메인 창에서 "다른 열린 문서도 함께 보내기"를 켰으면 참고 문서 규칙도 보인다.
+    let has_references = with_ui(|ui| ui.session.include_open_docs).unwrap_or(false);
     let _ = lbl.hwnd().SetWindowText(&fixed_prompt_title(format, has_tools));
-    let _ = txt.set_text(&to_crlf(&workflow::system_preview(format, has_tools)));
+    let _ = txt.set_text(&to_crlf(&workflow::system_preview(format, has_tools, has_references)));
 }
 
 /// 문서 형식 칸에서 고른 형식. 고른 것이 없으면 기본 형식.
@@ -1567,6 +1847,7 @@ fn open_settings(parent: &gui::WindowMain) {
                     .trim()
                     .to_string(),
                 format: Some(selected_format(&cmb_format)),
+                include_open_docs: with_ui(|ui| ui.session.include_open_docs).unwrap_or(false),
             };
             let written = settings::save_custom_system_prompt(&custom)
                 .and_then(|()| settings::save_gui_settings(&saved))
@@ -1639,7 +1920,14 @@ fn set_mcp_status(text: &str) {
 /// 2) 아니면 실행 중인 한글에 연결한다. 평문·HWPML은 `GetTextFile`(HWPML2X)과 커서 위치를,
 ///    Markdown은 커서 책갈피를 넣어 임시 HWPX로 저장(`SaveAs`)한 뒤 hwp2md로 바꾼 것을,
 ///    HWPML 파일은 `SaveAs(HWPML2X, "lock:false")`로 임시 저장한 파일을 얻는다.
-fn acquire_document(format: DocFormat) -> Result<DocSnapshot> {
+///
+/// `include_open_docs`면 한글에 열려 있는 다른 문서도 같은 형식으로 읽어 `others`에 담는다
+/// ([`hwp::other_documents`]). `picked`가 있으면 그 문서만 읽는다. `EAT_HWP_DOC`로 시험할 때는 읽지 않는다.
+fn acquire_document(
+    format: DocFormat,
+    include_open_docs: bool,
+    picked: Option<&[hwp::DocIdentity]>,
+) -> Result<DocSnapshot> {
     if let Ok(p) = std::env::var("EAT_HWP_DOC") {
         if !p.is_empty() {
             let content = match format {
@@ -1656,6 +1944,8 @@ fn acquire_document(format: DocFormat) -> Result<DocSnapshot> {
                 content,
                 path: p,
                 origin: None,
+                others: Vec::new(),
+                other_notes: Vec::new(),
             });
         }
     }
@@ -1675,6 +1965,12 @@ fn acquire_document(format: DocFormat) -> Result<DocSnapshot> {
             before.full_name,
             after.full_name
         ));
+    }
+    if include_open_docs {
+        let (others, notes) =
+            hwp::other_documents(&hwp, &before, format == DocFormat::Markdown, picked)?;
+        snapshot.others = others;
+        snapshot.other_notes = notes;
     }
     snapshot.origin = Some(before);
     Ok(snapshot)

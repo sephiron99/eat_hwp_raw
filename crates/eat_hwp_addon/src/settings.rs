@@ -53,6 +53,8 @@ pub struct GuiSettings {
     pub model: String,
     /// LLM에 보낼 문서 형식. 없으면 기본 형식.
     pub format: Option<DocFormat>,
+    /// 한글에 열려 있는 다른 문서도 참고 문서로 함께 보낼지.
+    pub include_open_docs: bool,
 }
 
 /// GUI 설정을 읽는다. 파일이 없거나 읽지 못하면 빈 설정. 모르는 이름과 `#`으로 시작하는 줄은 건너뛴다.
@@ -78,6 +80,7 @@ fn parse_gui_settings(text: &str) -> GuiSettings {
             "base_url" => settings.base_url = value.to_string(),
             "model" => settings.model = value.to_string(),
             "format" => settings.format = DocFormat::from_id(value),
+            "include_open_docs" => settings.include_open_docs = value == "true",
             _ => {}
         }
     }
@@ -97,6 +100,7 @@ pub fn save_gui_settings(settings: &GuiSettings) -> Result<()> {
     if let Some(format) = settings.format {
         text.push_str(&format!("format={}\n", format.id()));
     }
+    text.push_str(&format!("include_open_docs={}\n", settings.include_open_docs));
     std::fs::write(&file, text).with_context(|| format!("설정을 저장하지 못함: {}", file.display()))
 }
 

@@ -5,7 +5,7 @@
 //! 답은 GUI의 "커서 위치에 삽입" 버튼으로 문서에 넣는다(`hwp::insert_into`).
 
 use crate::config::Config;
-use crate::hwp::DocContent;
+use crate::hwp::{DocContent, OtherDoc};
 use crate::llm::{Completion, LlmBackend};
 use crate::mcp;
 use crate::parse;
@@ -15,7 +15,9 @@ use anyhow::Result;
 ///
 /// LLM에는 항상 문서 전체를 보낸다. `caret`은 `hwpml` 안에서 커서가 있는 바이트 위치(없으면
 /// `None`)이고, 그 자리에 [`parse::CARET_MARK`]를 넣어 LLM이 커서 위치를 알게 한다.
-/// `mcp_servers`가 있으면 그 도구를 LLM에 준다.
+/// `mcp_servers`가 있으면 그 도구를 LLM에 준다. `references`(한글에 함께 열려 있던 다른 문서)가 있으면
+/// 같은 형식으로 바꿔 참고 문서로 함께 보낸다.
+#[allow(clippy::too_many_arguments)]
 pub fn run_prompt(
     _cfg: &Config,
     backend: &dyn LlmBackend,
@@ -24,25 +26,28 @@ pub fn run_prompt(
     user_prompt: &str,
     custom_system: &str,
     mcp_servers: &[mcp::ServerSpec],
+    references: &[OtherDoc],
 ) -> Result<Completion> {
     // 커서 정보가 없으면(예: EAT_HWP_DOC 테스트 경로) 표시 없이 문서 전체만 보낸다.
-    let context = match (content, format) {
-        (DocContent::Hwpml { hwpml, caret }, DocFormat::Plain) => {
-            parse::document_text(&parse::parse_hwpml(hwpml)?, *caret)
-        }
-        (DocContent::Hwpml { hwpml, caret }, DocFormat::Hwpml | DocFormat::HwpmlFile) => {
-            parse::hwpml_for_llm(hwpml, *caret)
-        }
-        (DocContent::Markdown(md), DocFormat::Markdown) => md.clone(),
-        _ => anyhow::bail!("읽은 문서 내용이 고른 형식({})과 맞지 않음", format.label()),
-    };
+    let context = render(content, format)?;
     let has_caret = context.contains(parse::CARET_MARK);
+    let references = references
+        .iter()
+        .map(|doc| Ok((doc.name.as_str(), render(&doc.content, format)?)))
+        .collect::<Result<Vec<_>>>()?;
 
-    let system = build_system(format, has_caret, !mcp_servers.is_empty(), custom_system);
-    let user = build_user(&context, user_prompt);
+    let system = build_system(
+        format,
+        has_caret,
+        !mcp_servers.is_empty(),
+        !references.is_empty(),
+        custom_system,
+    );
+    let user = build_user(&context, &references, user_prompt);
     tracing::debug!(
         ?format,
         has_caret,
+        references = references.len(),
         context_chars = context.chars().count(),
         system_chars = system.chars().count(),
         custom_system_chars = custom_system.chars().count(),
@@ -53,6 +58,20 @@ pub fn run_prompt(
     // 문서 내용이 통째로 들어가므로 TRACE에서만 남긴다(EAT_HWP_LOG=trace).
     tracing::trace!(%user, "사용자 메시지 전문");
     backend.complete(&system, &user, mcp_servers)
+}
+
+/// 읽은 문서 내용을 `format` 형식의 글로 바꾼다. 커서 위치가 있으면 [`parse::CARET_MARK`]를 넣는다.
+fn render(content: &DocContent, format: DocFormat) -> Result<String> {
+    Ok(match (content, format) {
+        (DocContent::Hwpml { hwpml, caret }, DocFormat::Plain) => {
+            parse::document_text(&parse::parse_hwpml(hwpml)?, *caret)
+        }
+        (DocContent::Hwpml { hwpml, caret }, DocFormat::Hwpml | DocFormat::HwpmlFile) => {
+            parse::hwpml_for_llm(hwpml, *caret)
+        }
+        (DocContent::Markdown(md), DocFormat::Markdown) => md.clone(),
+        _ => anyhow::bail!("읽은 문서 내용이 고른 형식({})과 맞지 않음", format.label()),
+    })
 }
 
 /// LLM에 보낼 문서 형식. GUI에서 고른다.
@@ -133,12 +152,14 @@ impl DocFormat {
 }
 
 /// 시스템 메시지 미리보기: `format` 형식에 커서 표시가 있을 때의 고정 규약(①)과, 사용자 지정 지침(②)이
-/// 들어갈 자리. `has_tools`면 MCP 도구 규칙도 넣는다. GUI의 설정 창에 보인다.
-pub fn system_preview(format: DocFormat, has_tools: bool) -> String {
+/// 들어갈 자리. `has_tools`면 MCP 도구 규칙도, `has_references`면 참고 문서 규칙도 넣는다. GUI의 설정
+/// 창에 보인다.
+pub fn system_preview(format: DocFormat, has_tools: bool, has_references: bool) -> String {
     build_system(
         format,
         true,
         has_tools,
+        has_references,
         "(아래 칸에 쓴 사용자 지정 지침이 이 자리에 들어갑니다. 비우면 이 부분은 빠집니다.)",
     )
 }
@@ -150,11 +171,18 @@ pub fn system_preview(format: DocFormat, has_tools: bool) -> String {
 /// 레벨에 상응하도록 작성한다. 답변은 문서에 그대로 넣을 본문이어야 하므로 설명·인사말·마크다운을
 /// 붙이지 말라고 지시한다. `has_caret`이면 문서 안의 [`parse::CARET_MARK`]가 커서 위치라고 알린다.
 /// `has_tools`(MCP 서버가 설정됨)면 도구로 사실·근거를 찾되 그 과정은 답에 쓰지 말라고 알린다.
+/// `has_references`(다른 열린 문서를 함께 보냄)면 사용자 메시지의 참고 문서 부분을 설명한다.
 ///
 /// 매 요청 같은 문장을 앞에 두고 형식·커서에 따라 바뀌는 문장을 뒤에 둔다. 앞부분이 같으면 로컬
 /// 서버가 이전 계산을 재사용할 여지가 있다. 규약 부분은 코드가 갖고 사용자가 고칠 수 없다(바꾸면
 /// 결과를 문서에 넣는 흐름이 깨진다).
-fn build_system(format: DocFormat, has_caret: bool, has_tools: bool, custom_system: &str) -> String {
+fn build_system(
+    format: DocFormat,
+    has_caret: bool,
+    has_tools: bool,
+    has_references: bool,
+    custom_system: &str,
+) -> String {
     let mut system = String::from(
         "당신은 HWP 문서 작성 도우미입니다. 사용자가 보낸 문서의 양식(제목/소제목/문단 구조)을 최대한 \
          준수하여, 사용자 요청에 맞는 내용을 한국어로 작성하세요.\n\
@@ -179,15 +207,27 @@ fn build_system(format: DocFormat, has_caret: bool, has_tools: bool, custom_syst
             mark = parse::CARET_MARK
         ));
     }
+    if has_references {
+        system.push_str(
+            "- 사용자 메시지의 \"=== 참고 문서: 이름 ===\" 부분은 한글에 함께 열려 있는 다른 문서입니다. \
+             내용과 양식을 참고하되, 답변은 \"문서 내용\"에 넣을 글만 씁니다.\n",
+        );
+    }
     if has_tools {
         system.push_str(
-            "- 도구가 주어지면, 요청에 필요한 사실과 근거를 도구로 찾아 확인한 뒤 작성합니다. 도구를              부른 과정이나 출처 설명은 답변에 쓰지 않습니다.\n",
+            "- 도구가 주어지면, 요청에 필요한 사실과 근거를 도구로 찾아 확인한 뒤 작성합니다. 도구를 \
+             부른 과정이나 출처 설명은 답변에 쓰지 않습니다.\n",
         );
     }
     system
 }
 
-/// 사용자 메시지: 요청마다 바뀌는 데이터(문서 내용, 사용자 요청)만 담는다.
-fn build_user(doc_context: &str, user_prompt: &str) -> String {
-    format!("=== 문서 내용 ===\n{doc_context}\n\n=== 사용자 요청 ===\n{user_prompt}\n")
+/// 사용자 메시지: 요청마다 바뀌는 데이터(문서 내용, 참고 문서, 사용자 요청)만 담는다.
+fn build_user(doc_context: &str, references: &[(&str, String)], user_prompt: &str) -> String {
+    let mut user = format!("=== 문서 내용 ===\n{doc_context}\n\n");
+    for (name, text) in references {
+        user.push_str(&format!("=== 참고 문서: {name} ===\n{text}\n\n"));
+    }
+    user.push_str(&format!("=== 사용자 요청 ===\n{user_prompt}\n"));
+    user
 }
