@@ -7,7 +7,8 @@
 //! - LLM 상태 줄: 지금 설정이 가리키는 서버가 작동하는지 보인다. 창을 열 때, 설정 창에서 키나 모델을
 //!   바꿨을 때 서버에 모델 목록을 요청해 점검하고, 요청이 성공하면 "작동 중"으로, 실패하면 다시
 //!   점검해 원인(연결 안 됨, 인증 실패 등)을 보인다
-//! - 설정 요약 줄(모델, 보낼 문서 형식, 키 입력 여부)과 "설정…" 버튼
+//! - 설정 요약 줄(모델, 보낼 문서 형식, 키 입력 여부)과 "설명서", "설정…" 버튼. "설명서"는 사용자
+//!   설명서(`manual.txt`)를 보이는 창을 연다
 //! - 대화 칸(read-only multiline Edit): 보낸 프롬프트와 받은 답변을 채팅처럼 차례로 쌓는다
 //!   - `▶ 나 · 시각` / `◀ AI (모델, 걸린 시간) · 시각` 머리줄로 말한 쪽과 그 글이 대화 칸에 나온
 //!     시각(시스템 로컬 시간, 초 단위)을 보이고, 한 차례가 끝날 때마다
@@ -66,6 +67,9 @@ const ID_BTN_RUN: u16 = 1002;
 
 /// Ctrl+Enter 가속기의 명령 ID. 창 어디에서 눌러도 보내기 버튼을 누른 것과 같다.
 const ID_ACCEL_SEND: u16 = 2001;
+
+/// 사용자 설명서. "설명서" 창에 보인다.
+const MANUAL: &str = include_str!("manual.txt");
 
 /// 대화 칸에서 한 차례(프롬프트 + 답변)가 끝날 때마다 넣는 구분선.
 const TURN_SEPARATOR: &str = "────────────────────────────";
@@ -168,6 +172,7 @@ pub struct MainWindow {
     #[allow(dead_code)]
     lbl_summary: gui::Label,
     btn_settings: gui::Button,
+    btn_manual: gui::Button,
     btn_insert: gui::Button,
 }
 
@@ -297,7 +302,17 @@ impl MainWindow {
                 text: "",
                 position: gui::dpi(10, 33),
                 resize_behavior: (gui::Horz::Resize, gui::Vert::None),
-                size: gui::dpi(400, 16),
+                size: gui::dpi(310, 16),
+                ..Default::default()
+            },
+        );
+        let btn_manual = gui::Button::new(
+            &wnd,
+            gui::ButtonOpts {
+                text: "설명서",
+                position: gui::dpi(330, 28),
+                resize_behavior: (gui::Horz::Repos, gui::Vert::None),
+                width: gui::dpi_x(80),
                 ..Default::default()
             },
         );
@@ -348,6 +363,7 @@ impl MainWindow {
             lbl_status,
             lbl_summary,
             btn_settings,
+            btn_manual,
             btn_insert,
         };
         new_self.events();
@@ -389,6 +405,15 @@ impl MainWindow {
             p.info.ptMinTrackSize = winsafe::POINT::with(w, h);
             Ok(())
         });
+
+        // 설명서 창.
+        {
+            let wnd2 = wnd.clone();
+            self.btn_manual.on().bn_clicked(move || {
+                open_manual(&wnd2);
+                Ok(())
+            });
+        }
 
         // 설정 창.
         {
@@ -1036,6 +1061,57 @@ fn chat_len(log: &gui::Edit) -> i32 {
 /// 여러 줄 Edit는 줄바꿈으로 `\r\n`만 인식한다.
 fn to_crlf(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\n', "\r\n")
+}
+
+/// 설명서 창(모달). 사용자 설명서([`MANUAL`])를 읽기 전용 칸에 보인다.
+fn open_manual(parent: &gui::WindowMain) {
+    let dlg = gui::WindowModal::new(gui::WindowModalOpts {
+        title: "eat_hwp_raw 설명서",
+        size: gui::dpi(640, 560),
+        ..Default::default()
+    });
+    let txt = gui::Edit::new(
+        &dlg,
+        gui::EditOpts {
+            position: gui::dpi(10, 10),
+            width: gui::dpi_x(620),
+            height: gui::dpi_y(504),
+            control_style: co::ES::MULTILINE | co::ES::AUTOVSCROLL | co::ES::READONLY,
+            window_style: co::WS::CHILD
+                | co::WS::VISIBLE
+                | co::WS::TABSTOP
+                | co::WS::GROUP
+                | co::WS::VSCROLL,
+            ..Default::default()
+        },
+    );
+    let btn_close = gui::Button::new(
+        &dlg,
+        gui::ButtonOpts {
+            text: "닫기",
+            position: gui::dpi(545, 526),
+            width: gui::dpi_x(85),
+            ..Default::default()
+        },
+    );
+    {
+        let txt = txt.clone();
+        dlg.on().wm_create(move |_| {
+            txt.limit_text(None);
+            let _ = txt.set_text(&to_crlf(MANUAL));
+            Ok(0)
+        });
+    }
+    {
+        let dlg2 = dlg.clone();
+        btn_close.on().bn_clicked(move || {
+            dlg2.close();
+            Ok(())
+        });
+    }
+    if let Err(e) = dlg.show_modal(parent) {
+        tracing::warn!(error = %e, "설명서 창을 열지 못함");
+    }
 }
 
 /// 설정 창의 고정 프롬프트 제목.
