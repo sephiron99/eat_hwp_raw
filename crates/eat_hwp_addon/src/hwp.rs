@@ -77,38 +77,88 @@ fn identity(doc: &hwp_com::method::xhwp::XHwpDocument) -> Result<DocIdentity> {
     })
 }
 
-/// 원래 문서(`origin`)의 커서 자리에 `text`를 넣는다. 원래 문서가 아닌 곳에는 넣지 않는다.
+/// `doc`을 활성 문서로 만든다. 이미 활성 문서면 그대로 두고 `false`, 바꿨으면 `true`.
 ///
-/// 원래 문서가 활성 문서가 아니면(응답을 기다리는 사이 다른 탭으로 간 경우) 원래 문서를 찾아
-/// 활성화한 뒤 넣는다. 그 문서의 커서 자리에 들어간다. 원래 문서를 찾지 못하거나(닫힘, 다른 이름으로
-/// 저장해 경로가 바뀜) 활성화하지 못하면 넣지 않고 오류를 돌려준다. 활성 문서를 바꿨으면 `true`.
-pub fn insert_into(hwp: &HwpObject, origin: &DocIdentity, text: &str) -> Result<bool> {
-    if active_document(hwp)? == *origin {
-        insert_text(hwp, text)?;
+/// 한글의 읽기·쓰기 API는 활성 문서에만 통한다. `doc`을 찾지 못하거나(닫힘, 다른 이름으로 저장해 경로가
+/// 바뀜) 활성화하지 못하면 오류다.
+pub fn activate(hwp: &HwpObject, doc: &DocIdentity) -> Result<bool> {
+    if active_document(hwp)? == *doc {
         return Ok(false);
     }
-    let doc = hwp
+    let found = hwp
         .documents()
-        .and_then(|docs| docs.find_item(origin.id))
-        .map_err(|e| anyhow!("원래 문서를 찾지 못함(닫혔을 수 있음): {e}"))?;
-    let found = identity(&doc)?;
-    if found != *origin {
+        .and_then(|docs| docs.find_item(doc.id))
+        .map_err(|e| anyhow!("문서 {}을(를) 찾지 못함(닫혔을 수 있음): {e}", doc.name()))?;
+    let found_id = identity(&found)?;
+    if found_id != *doc {
         bail!(
-            "원래 문서를 찾지 못함: 읽을 때 {:?}(ID {}), 지금 그 ID는 {:?}",
-            origin.full_name,
-            origin.id,
-            found.full_name
+            "문서 {}을(를) 찾지 못함: 문서 번호 {}은(는) 지금 {:?}",
+            doc.name(),
+            doc.id,
+            found_id.full_name
         );
     }
-    doc.set_active()
-        .map_err(|e| anyhow!("원래 문서를 활성화하지 못함: {e}"))?;
-    // 활성화가 실제로 됐는지 넣기 직전에 다시 확인한다.
+    found
+        .set_active()
+        .map_err(|e| anyhow!("문서 {}을(를) 활성화하지 못함: {e}", doc.name()))?;
+    // 활성화가 실제로 됐는지 다시 확인한다.
     let active = active_document(hwp)?;
-    if active != *origin {
-        bail!("원래 문서를 활성화하지 못함: 활성 문서가 {:?}", active.full_name);
+    if active != *doc {
+        bail!("문서 {}을(를) 활성화하지 못함: 활성 문서가 {:?}", doc.name(), active.full_name);
     }
-    insert_text(hwp, text)?;
     Ok(true)
+}
+
+/// `doc`이 한글에 열려 있는지. 열린 문서를 모두 훑어 번호와 경로가 같은 문서가 있으면 `true`.
+/// 문서를 닫았거나 다른 이름으로 저장해 경로가 바뀌었으면 `false`. 한글이 응답하지 않아(바쁨, 꺼짐)
+/// 훑지 못했으면 오류다(닫혔다고 단정하지 않는다).
+pub fn document_open(hwp: &HwpObject, doc: &DocIdentity) -> Result<bool> {
+    let docs = hwp
+        .documents()
+        .map_err(|e| anyhow!("열린 문서 목록을 얻지 못함: {e}"))?;
+    let count = docs
+        .count()
+        .map_err(|e| anyhow!("열린 문서 수를 얻지 못함: {e}"))?;
+    for i in 0..count {
+        let item = docs
+            .item(i)
+            .map_err(|e| anyhow!("열린 문서 {}번을 얻지 못함: {e}", i + 1))?;
+        if identity(&item)? == *doc {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// 문서 번호가 `id`인 열린 문서. 없으면 `None`, 한글이 응답하지 않아 훑지 못했으면 오류.
+pub fn document_by_id(hwp: &HwpObject, id: i32) -> Result<Option<DocIdentity>> {
+    let docs = hwp
+        .documents()
+        .map_err(|e| anyhow!("열린 문서 목록을 얻지 못함: {e}"))?;
+    let count = docs
+        .count()
+        .map_err(|e| anyhow!("열린 문서 수를 얻지 못함: {e}"))?;
+    for i in 0..count {
+        let item = docs
+            .item(i)
+            .map_err(|e| anyhow!("열린 문서 {}번을 얻지 못함: {e}", i + 1))?;
+        let found = identity(&item)?;
+        if found.id == id {
+            return Ok(Some(found));
+        }
+    }
+    Ok(None)
+}
+
+/// 원래 문서(`origin`)의 커서 자리에 `text`를 넣는다. 원래 문서가 아닌 곳에는 넣지 않는다.
+///
+/// 원래 문서가 활성 문서가 아니면(다른 탭을 보고 있는 경우) 원래 문서를 활성화한 뒤 넣는다([`activate`]).
+/// 그 문서의 커서 자리에 들어간다. 원래 문서를 찾지 못하거나 활성화하지 못하면 넣지 않고 오류를
+/// 돌려준다. 활성 문서를 바꿨으면 `true`.
+pub fn insert_into(hwp: &HwpObject, origin: &DocIdentity, text: &str) -> Result<bool> {
+    let switched = activate(hwp, origin)?;
+    insert_text(hwp, text)?;
+    Ok(switched)
 }
 
 impl DocIdentity {
@@ -121,9 +171,15 @@ impl DocIdentity {
     }
 }
 
-/// 활성 문서 말고 한글에 열려 있는 문서들("문서 고르기" 창의 목록).
-pub fn open_documents_except_active(hwp: &HwpObject) -> Result<Vec<DocIdentity>> {
-    let active = active_document(hwp)?;
+/// `except`(없으면 활성 문서) 말고 한글에 열려 있는 문서들("문서 고르기" 창의 목록).
+pub fn open_documents_except(
+    hwp: &HwpObject,
+    except: Option<&DocIdentity>,
+) -> Result<Vec<DocIdentity>> {
+    let active = match except {
+        Some(doc) => doc.clone(),
+        None => active_document(hwp)?,
+    };
     let docs = hwp
         .documents()
         .map_err(|e| anyhow!("열린 문서 목록을 얻지 못함: {e}"))?;
@@ -369,10 +425,4 @@ pub fn document_markdown(hwp: &HwpObject) -> Result<DocSnapshot> {
         others: Vec::new(),
         other_notes: Vec::new(),
     })
-}
-
-/// 실행 중인 한글의 현재 문서 파일 경로. 저장하지 않은 문서는 빈 문자열.
-pub fn current_document_path() -> Result<String> {
-    let hwp = connect()?;
-    hwp.path().map_err(|e| anyhow!("문서 경로를 읽지 못함: {e}"))
 }

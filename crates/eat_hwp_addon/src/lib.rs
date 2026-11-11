@@ -11,7 +11,8 @@
 //! 아래는 현재 구현의 설명이다. 현재는 GUI 프로세스가 한글에 직접 붙어 HWPML을 읽는다.
 //!
 //! 애드온 DLL은 한글(HWP) 프로세스 안에 로드되어 동작한다. 리본 버튼/단축키 `Ctrl+]`를 누르면
-//! **별도 실행파일 없이** 같은 DLL에 통합된 GUI를 **독립 프로세스**로 띄운다. 한글이 종료돼도
+//! **별도 실행파일 없이** 같은 DLL에 통합된 GUI를 **독립 프로세스**로 띄운다. 지금 문서의 GUI 창이
+//! 이미 떠 있으면 띄우는 대신 그 창을 앞으로 가져온다(창 제목으로 찾음). 한글이 종료돼도
 //! GUI 프로세스는 살아남는다.
 //!
 //! 기동: `do_action`이 32비트 `rundll32.exe <self.dll>,RunGuiW` 를 자식 프로세스로 spawn한다.
@@ -118,12 +119,18 @@ impl HwpUserAction for EatHwpLauncher {
         }
     }
 
-    /// 버튼/단축키(`Ctrl+]`)로 호출. GUI를 **독립 프로세스**로 띄운다(한글 종료와 무관히 생존).
-    fn do_action(&self, action_name: &str, _hwp: &HwpObject) -> Result<bool> {
+    /// 버튼/단축키(`Ctrl+]`)로 호출. GUI를 **독립 프로세스**로 띄운다(한글 종료와 무관히 생존). 지금
+    /// 문서의 GUI가 이미 떠 있으면 그 창을 활성화한다.
+    fn do_action(&self, action_name: &str, hwp: &HwpObject) -> Result<bool> {
         if action_name != ACTION_LAUNCH {
             return Ok(false);
         }
-        match launch_gui_process() {
+        // 지금 문서의 GUI 창이 이미 떠 있으면 새로 띄우지 않고 그 창을 앞으로 가져온다.
+        let doc = hwp::active_document(hwp).ok();
+        if doc.as_ref().is_some_and(activate_gui_for) {
+            return Ok(true);
+        }
+        match launch_gui_process(doc.as_ref()) {
             Ok(()) => Ok(true),
             Err(e) => {
                 msgbox_err("eat_hwp_raw GUI 실행 실패", &e);
@@ -166,12 +173,34 @@ fn init_log(file_name: &str) {
     }
 }
 
+// ── 떠 있는 GUI 활성화 ──
+
+/// `doc`(한글의 활성 문서)을 대상 문서로 하는 GUI 창이 떠 있으면 앞으로 가져온다. 가져왔으면 `true`.
+///
+/// GUI 창의 제목은 대상 문서마다 다르다([`app::window_title`]). 활성 문서로 같은 제목을 만들어 창을
+/// 찾고, 최소화돼 있으면 되살린 뒤 활성화한다. 한글이 전경 프로세스이므로 다른 프로세스의 창을 앞으로
+/// 가져올 수 있다. 창이 없으면 `false`(새로 띄운다).
+fn activate_gui_for(doc: &hwp::DocIdentity) -> bool {
+    let title = app::window_title(Some(doc));
+    let Ok(Some(wnd)) = winsafe::HWND::FindWindow(None, Some(&title)) else {
+        return false;
+    };
+    if wnd.IsIconic() {
+        wnd.ShowWindow(winsafe::co::SW::RESTORE);
+    }
+    let activated = wnd.SetForegroundWindow();
+    tracing::debug!(%title, activated, "떠 있는 GUI 창 활성화");
+    true
+}
+
 // ── GUI 프로세스 기동 ──
 
 /// 통합 GUI를 독립 프로세스로 띄운다: 32비트 `rundll32.exe <self.dll>,RunGuiW`.
 /// 자식은 부모(HWP)와 독립이라 한글이 종료돼도 유지된다. 부모가 kill-on-close Job에 있을
 /// 경우까지 대비해 `CREATE_BREAKAWAY_FROM_JOB`를 먼저 시도하고, 거부되면 일반 spawn으로 폴백한다.
-fn launch_gui_process() -> std::result::Result<(), String> {
+///
+/// `doc`(한글의 활성 문서)을 환경 변수로 넘긴다. GUI 창은 그 문서에 고정된다.
+fn launch_gui_process(doc: Option<&hwp::DocIdentity>) -> std::result::Result<(), String> {
     let dll = self_dll_path().ok_or_else(|| "자기 DLL 경로 조회 실패".to_string())?;
     let rundll = rundll32_path();
     // rundll32는 콤마 앞 경로에 공백이 있으면 파싱이 깨지므로 경로를 따옴표로 감싼다.
@@ -180,10 +209,14 @@ fn launch_gui_process() -> std::result::Result<(), String> {
     tracing::debug!(rundll = %rundll.display(), %entry, "spawn");
 
     let spawn = |flags: u32| {
-        Command::new(&rundll)
-            .raw_arg(&entry)
-            .creation_flags(flags)
-            .spawn()
+        let mut command = Command::new(&rundll);
+        command.raw_arg(&entry).creation_flags(flags);
+        if let Some(doc) = doc {
+            command
+                .env(app::TARGET_ID_ENV, doc.id.to_string())
+                .env(app::TARGET_NAME_ENV, &doc.full_name);
+        }
+        command.spawn()
     };
     // Child 핸들은 drop돼도 프로세스는 계속 실행된다(wait 안 함).
     spawn(CREATE_BREAKAWAY_FROM_JOB | DETACHED_PROCESS)

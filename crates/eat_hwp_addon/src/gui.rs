@@ -16,8 +16,10 @@
 //!     그 줄을 답변으로 바꾼다. 실패하면 `◀ 오류`로 남긴다
 //!   - 각 요청은 독립이다. 이전 대화는 LLM에 보내지 않는다
 //!   - 대화는 문서와 API 종류(로컬/OpenAI 호환, Claude)마다 `chat_store`가 정한 파일에 저장되고,
-//!     같은 문서·API로 돌아오면 다시 불러온다. 창을 열 때 한글의 현재 문서를, 요청을 보낼 때 읽은
-//!     문서를, 메인 창의 상태를 점검할 때 그 설정의 API 종류를 기준으로 바꾼다
+//!     같은 문서·API로 돌아오면 다시 불러온다. 문서는 창을 열 때 정해지고(대상 문서), API 종류는 메인
+//!     창의 상태를 점검할 때 그 설정을 기준으로 바꾼다
+//! - 창은 처음 띄운 문서(대상 문서)에 고정된다. "보내기"는 한글에서 어느 탭을 보고 있든 그 문서를
+//!   읽고, 답도 그 문서에만 넣는다. 대상 문서가 닫히면 창도 닫는다(`bind_document`, `watch_document`)
 //! - "다른 열린 문서도 함께 보내기" 체크 칸: 켜면 한글에 열려 있는 다른 문서도 같은 형식으로 읽어 참고
 //!   문서로 함께 보낸다. 바꾸면 `settings.txt`에 남는다. "문서 고르기…" 버튼으로 보낼 문서를 고를 수
 //!   있다(고른 적이 없으면 모두 보낸다)
@@ -107,6 +109,9 @@ struct Ui {
     /// "문서 고르기"에서 고른 문서. 고른 적이 없으면 `None`(열린 문서를 모두 보낸다). 한글의 문서 ID는
     /// 한글을 다시 띄우면 달라지므로 저장하지 않는다.
     picked_docs: Option<Vec<hwp::DocIdentity>>,
+    /// 이 창이 고정된 대상 문서. 애드온이 넘긴 문서이고, 넘기지 않았으면 창을 열 때 한글의 활성 문서다.
+    /// "보내기"는 항상 이 문서를 읽고 답도 이 문서에만 넣는다. 한글에 붙지 못했으면 `None`.
+    bound: Option<hwp::DocIdentity>,
 }
 
 /// "커서 위치에 삽입"으로 넣을 답.
@@ -200,9 +205,11 @@ impl MainWindow {
             cmd: ID_ACCEL_SEND,
         }])
         .ok();
+        // 애드온이 넘긴 대상 문서. 창 제목에 바로 넣어, 애드온이 이 문서의 창을 곧바로 찾을 수 있게 한다.
+        let bound = crate::app::target_from_env();
         let wnd = gui::WindowMain::new(gui::WindowMainOpts {
             accel_table,
-            title: "eat_hwp_raw — HWP AI Agent",
+            title: &crate::app::window_title(bound.as_ref()),
             size: gui::dpi(520, 504),
             // 크기 조절 테두리와 최대화 버튼. 대화 칸이 늘고 줄며, 아래 줄은 바닥에 붙어 움직인다.
             style: co::WS::CAPTION
@@ -386,6 +393,7 @@ impl MainWindow {
                 chk_others: chk_others.clone(),
                 btn_pick: btn_pick.clone(),
                 picked_docs: None,
+                bound: bound.clone(),
             })
         });
 
@@ -434,7 +442,7 @@ impl MainWindow {
                 }) {
                     check_server(&wnd2, cfg, Target::Main);
                 }
-                load_current_document_chat(&wnd2);
+                bind_document(&wnd2);
                 Ok(0)
             });
         }
@@ -471,9 +479,11 @@ impl MainWindow {
             let btn_pick = self.btn_pick.clone();
             self.btn_pick.on().bn_clicked(move || {
                 btn_pick.hwnd().EnableWindow(false);
+                let bound = with_ui(|ui| ui.bound.clone()).flatten();
                 let wnd = wnd2.clone();
                 std::thread::spawn(move || {
-                    let docs = hwp::connect().and_then(|hwp| hwp::open_documents_except_active(&hwp));
+                    let docs = hwp::connect()
+                        .and_then(|hwp| hwp::open_documents_except(&hwp, bound.as_ref()));
                     let wnd_ui = wnd.clone();
                     wnd.run_ui_thread(move || {
                         with_ui(|ui| ui.btn_pick.hwnd().EnableWindow(true));
@@ -526,7 +536,18 @@ impl MainWindow {
             let btn_run = self.btn_run.clone();
             let btn_insert = self.btn_insert.clone();
             self.btn_insert.on().bn_clicked(move || {
-                let Some(answer) = with_ui(|ui| ui.answer.clone()).flatten() else {
+                let Some(answer) = with_ui(|ui| {
+                    // 창이 고정된 대상 문서에 넣는다. 답을 받은 뒤 새 문서를 처음 저장해 이름이 생겼으면
+                    // 바뀐 이름으로 찾아야 한다.
+                    let bound = ui.bound.clone();
+                    ui.answer.clone().map(|mut answer| {
+                        if bound.is_some() {
+                            answer.origin = bound;
+                        }
+                        answer
+                    })
+                })
+                .flatten() else {
                     return Ok(());
                 };
                 btn_insert.hwnd().EnableWindow(false);
@@ -566,12 +587,13 @@ impl MainWindow {
             let user_prompt = txt_prompt.text().unwrap_or_default();
             // 설정 창에서 키를 입력했으면 Claude API로, 비웠으면 환경 변수 설정대로 실행한다.
             // 모델이 비어 있지 않으면 그 모델을 쓴다.
-            let Some((cfg, format, include_open_docs, picked_docs)) = with_ui(|ui| {
+            let Some((cfg, format, include_open_docs, picked_docs, bound)) = with_ui(|ui| {
                 (
                     session_cfg(ui),
                     ui.session.format,
                     ui.session.include_open_docs,
                     ui.picked_docs.clone(),
+                    ui.bound.clone(),
                 )
             }) else {
                 return Ok(());
@@ -601,7 +623,12 @@ impl MainWindow {
                 let started = Instant::now();
                 // 창을 연 뒤에 서버가 켜진 경우 등, 서버에 없는 모델이 설정에 남아 있을 수 있다.
                 let cfg = preflight_model(cfg, &wnd);
-                let doc = acquire_document(format, include_open_docs, picked_docs.as_deref());
+                let doc = acquire_document(
+                    format,
+                    include_open_docs,
+                    picked_docs.as_deref(),
+                    bound.as_ref(),
+                );
                 match &doc {
                     Ok(d) => tracing::info!(
                         ?format,
@@ -615,11 +642,15 @@ impl MainWindow {
                 // 대화에 쌓고 오류로 마친다.
                 {
                     let doc_path = doc.as_ref().ok().map(|d| d.path.clone());
+                    let target = doc.as_ref().ok().and_then(|d| d.origin.clone());
                     let provider = cfg.llm_provider;
                     let user_prompt = user_prompt.clone();
                     wnd.run_ui_thread(move || {
                         if let Some(path) = doc_path {
                             chat_set_context(Some(path), provider);
+                        }
+                        if target.is_some() {
+                            show_target_document(target.as_ref());
                         }
                         chat_begin(&user_prompt);
                         Ok(())
@@ -1053,16 +1084,21 @@ fn finish_on_ui(
     chat_save();
 }
 
-/// 워커 스레드에서 한글의 현재 문서 경로를 읽어, UI 스레드에서 그 문서의 대화를 불러온다.
-/// 한글에 붙지 못하면 문서를 모르는 채로 둔다(첫 요청 때 정해진다).
-fn load_current_document_chat(wnd: &gui::WindowMain) {
+/// 대상 문서가 아직 열려 있는지 확인하는 간격.
+const WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// 창을 대상 문서에 고정한다. 워커 스레드에서 한글에 붙어 대상 문서를 정하고(애드온이 넘긴 문서, 없으면
+/// 지금 활성 문서), UI 스레드에서 창 제목과 그 문서의 대화를 맞춘다. 그 뒤 같은 스레드에서 대상 문서를
+/// 지켜보다가 닫히면 창을 닫는다([`watch_document`]).
+///
+/// `EAT_HWP_DOC`로 시험할 때는 그 파일의 대화만 불러온다. 한글에 붙지 못하고 넘겨받은 문서도 없으면
+/// 고정하지 않는다(요청 때 활성 문서를 읽는다).
+fn bind_document(wnd: &gui::WindowMain) {
     let wnd = wnd.clone();
     std::thread::spawn(move || {
-        let path = match std::env::var("EAT_HWP_DOC") {
-            Ok(p) if !p.is_empty() => Some(p),
-            _ => hwp::current_document_path().ok(),
-        };
-        if let Some(path) = path {
+        if let Ok(path) = std::env::var("EAT_HWP_DOC")
+            && !path.is_empty()
+        {
             wnd.run_ui_thread(move || {
                 let provider = CHAT.with_borrow(|chat| chat.as_ref().map(|c| c.provider));
                 if let Some(provider) = provider {
@@ -1070,8 +1106,106 @@ fn load_current_document_chat(wnd: &gui::WindowMain) {
                 }
                 Ok(())
             });
+            return;
+        }
+        let hwp = hwp::connect().ok();
+        let active = hwp.as_ref().and_then(|hwp| hwp::active_document(hwp).ok());
+        let Some(bound) = crate::app::target_from_env().or_else(|| active.clone()) else {
+            tracing::warn!("대상 문서를 알 수 없어 창을 문서에 고정하지 않음");
+            return;
+        };
+        // 대화 기록은 문서 경로로 나눈다. 대상 문서가 활성 문서면 한글이 주는 경로를 쓴다.
+        let path = match &hwp {
+            Some(hwp) if active.as_ref() == Some(&bound) => {
+                hwp.path().unwrap_or_else(|_| bound.full_name.clone())
+            }
+            _ => bound.full_name.clone(),
+        };
+        tracing::info!(doc_id = bound.id, doc = %bound.full_name, "창을 대상 문서에 고정");
+        {
+            let bound = bound.clone();
+            wnd.run_ui_thread(move || {
+                let provider = CHAT.with_borrow(|chat| chat.as_ref().map(|c| c.provider));
+                if let Some(provider) = provider {
+                    chat_set_context(Some(path), provider);
+                }
+                show_target_document(Some(&bound));
+                with_ui(|ui| ui.bound = Some(bound));
+                Ok(())
+            });
+        }
+        watch_document(&wnd, hwp, bound);
+    });
+}
+
+/// 저장하지 않은 새 문서가 처음 저장돼 이름이 생겼을 때 창을 그 이름으로 다시 고정한다(UI 스레드).
+/// 창 제목과 대상 문서를 바꾸고, 대화 칸의 글은 그대로 둔 채 기록 파일만 새 이름의 것으로 옮겨 쓴다.
+fn rebind_document(saved: hwp::DocIdentity) {
+    CHAT.with_borrow_mut(|chat| {
+        if let Some(chat) = chat {
+            chat.file = chat_store::chat_file(&saved.full_name, chat.provider);
+            chat.doc_path = Some(saved.full_name.clone());
         }
     });
+    chat_save();
+    show_target_document(Some(&saved));
+    with_ui(|ui| ui.bound = Some(saved));
+}
+
+/// 대상 문서(`bound`)가 한글에서 닫히면 창을 닫는다(워커 스레드, 창이 닫힐 때까지 돈다).
+///
+/// [`WATCH_INTERVAL`]마다 열린 문서를 훑는다. 문서를 닫았거나 다른 이름으로 저장해 경로가 바뀌었으면
+/// 닫힌 것으로 본다. 한글이 꺼져 붙지 못하는 것도 닫힌 것이다. 두 번 이어서 그렇게 확인되면 창을
+/// 닫는다. 한글이 바빠(대화 상자 등) 훑지 못한 것은 닫힌 것으로 치지 않고 다시 붙어 본다.
+///
+/// 저장하지 않은 새 문서를 처음 저장해 이름이 생긴 것은 닫힌 것이 아니다. 같은 문서 번호로 이름이 생긴
+/// 문서가 있으면 창을 그 이름으로 다시 고정한다([`rebind_document`]).
+fn watch_document(
+    wnd: &gui::WindowMain,
+    mut hwp: Option<hwp_com::HwpObject>,
+    mut bound: hwp::DocIdentity,
+) {
+    let mut gone = 0;
+    loop {
+        std::thread::sleep(WATCH_INTERVAL);
+        let mut open = match &hwp {
+            Some(hwp) => hwp::document_open(hwp, &bound),
+            None => Err(anyhow!("한글에 붙어 있지 않음")),
+        };
+        if let (Ok(false), Some(hwp), true) = (&open, &hwp, bound.full_name.is_empty())
+            && let Ok(Some(saved)) = hwp::document_by_id(hwp, bound.id)
+            && !saved.full_name.is_empty()
+        {
+            tracing::info!(doc_id = saved.id, doc = %saved.full_name, "새 문서가 저장돼 창을 그 이름에 다시 고정");
+            bound = saved.clone();
+            wnd.run_ui_thread(move || {
+                rebind_document(saved);
+                Ok(())
+            });
+            open = Ok(true);
+        }
+        match open {
+            Ok(true) => gone = 0,
+            Ok(false) => gone += 1,
+            Err(_) => match hwp::connect() {
+                // 다시 붙었다. 다음 차례에 훑어 본다.
+                Ok(again) => hwp = Some(again),
+                Err(_) => {
+                    hwp = None;
+                    gone += 1;
+                }
+            },
+        }
+        if gone >= 2 {
+            tracing::info!(doc_id = bound.id, doc = %bound.full_name, "대상 문서가 닫혀 창을 닫음");
+            let wnd_ui = wnd.clone();
+            wnd.run_ui_thread(move || {
+                wnd_ui.close();
+                Ok(())
+            });
+            return;
+        }
+    }
 }
 
 /// API 종류만 바꾼다(UI 스레드).
@@ -1093,7 +1227,6 @@ fn chat_set_context(doc_path: Option<String>, provider: Provider) {
         }
         chat.doc_path = doc_path;
         chat.provider = provider;
-        show_target_document(chat.doc_path.as_deref());
         let file = chat
             .doc_path
             .as_deref()
@@ -1114,19 +1247,10 @@ fn chat_set_context(doc_path: Option<String>, provider: Provider) {
     });
 }
 
-/// 메인 창의 제목에 대상 문서(답을 넣을 원래 문서)의 이름을 보인다(UI 스레드). 함께 보내는 참고 문서와
-/// 가려 볼 수 있게 한다. 저장하지 않은 문서는 `제목없음`, 문서를 아직 모르면 프로그램 이름만 보인다.
-fn show_target_document(doc_path: Option<&str>) {
-    let title = match doc_path {
-        None => "eat_hwp_raw — HWP AI Agent".to_string(),
-        Some(path) => {
-            let name = std::path::Path::new(path)
-                .file_name()
-                .map(|file| file.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "제목없음".to_string());
-            format!("eat_hwp_raw — 대상 문서: {name}")
-        }
-    };
+/// 메인 창의 제목에 대상 문서(답을 넣을 원래 문서)를 보인다(UI 스레드). 함께 보내는 참고 문서와 가려 볼
+/// 수 있게 하고, 애드온이 이 문서의 GUI 창을 제목으로 찾을 수 있게 한다([`crate::app::window_title`]).
+fn show_target_document(doc: Option<&hwp::DocIdentity>) {
+    let title = crate::app::window_title(doc);
     with_ui(|ui| {
         if let Ok(main) = ui.status.hwnd().GetParent() {
             let _ = main.SetWindowText(&title);
@@ -1927,6 +2051,7 @@ fn acquire_document(
     format: DocFormat,
     include_open_docs: bool,
     picked: Option<&[hwp::DocIdentity]>,
+    bound: Option<&hwp::DocIdentity>,
 ) -> Result<DocSnapshot> {
     if let Ok(p) = std::env::var("EAT_HWP_DOC") {
         if !p.is_empty() {
@@ -1950,9 +2075,17 @@ fn acquire_document(
         }
     }
     let hwp = hwp::connect()?;
-    // 읽는 문서를 기록해 두고, 답은 이 문서에만 넣는다. 읽는 사이 활성 문서가 바뀌면 어느 문서를
-    // 읽었는지 확실하지 않으므로 실패로 본다.
-    let before = hwp::active_document(&hwp)?;
+    // 이 창이 고정된 문서(`bound`)를 읽는다. 한글에서 다른 탭을 보고 있으면 그 문서를 활성화해 읽고,
+    // 다 읽은 뒤 보던 탭으로 되돌린다. 답은 읽은 문서에만 넣는다. 읽는 사이 활성 문서가 바뀌면 어느
+    // 문서를 읽었는지 확실하지 않으므로 실패로 본다.
+    let previous = hwp::active_document(&hwp)?;
+    let before = match bound {
+        Some(bound) => {
+            hwp::activate(&hwp, bound)?;
+            bound.clone()
+        }
+        None => previous.clone(),
+    };
     let mut snapshot = match format {
         DocFormat::Plain | DocFormat::Hwpml => hwp::document_snapshot(&hwp),
         DocFormat::Markdown => hwp::document_markdown(&hwp),
@@ -1971,6 +2104,11 @@ fn acquire_document(
             hwp::other_documents(&hwp, &before, format == DocFormat::Markdown, picked)?;
         snapshot.others = others;
         snapshot.other_notes = notes;
+    }
+    if previous != before
+        && let Err(e) = hwp::activate(&hwp, &previous)
+    {
+        tracing::warn!(error = %format!("{e:#}"), "보던 문서로 돌아가지 못함");
     }
     snapshot.origin = Some(before);
     Ok(snapshot)
