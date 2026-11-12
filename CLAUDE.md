@@ -146,10 +146,17 @@ GUI는 `eat_hwp_addon`에 두고 독립 프로세스로 실행한다. 구성:
 - "보내기"는 한글에서 어느 탭을 보고 있든 대상 문서를 읽는다. 대상 문서가 활성 문서가 아니면 활성화해
   읽고(`hwp::activate`), 다 읽은 뒤 보던 탭으로 되돌린다. 답도 대상 문서에만 넣는다(넣은 뒤에는 대상 문서가
   활성 문서로 남는다)
-- 대상 문서가 닫히면 GUI 창도 닫는다(창의 정상 닫기). 워커 스레드가 2초마다 열린 문서를 훑어, 번호와
-  경로가 같은 문서가 두 번 이어서 없으면 닫는다(`gui::watch_document`, `hwp::document_open`). 다른 이름으로
-  저장해 경로가 바뀐 것, 한글이 꺼진 것도 닫힌 것으로 본다. 한글이 바빠 훑지 못한 것은 닫힌 것으로 치지
-  않는다
+- 대상 문서가 닫히면 GUI 창도 닫는다(창의 정상 닫기). 한글의 이벤트로 안다: 워커 스레드가
+  hwp_automation_rs의 `hwp.ext_events().subscribe`(`ext/events.rs`)로 이벤트에 연결하고, 0.2초마다
+  `hwp_com::pump_pending_messages`로 그 스레드의 메시지를 처리해 이벤트를 받는다(`gui::subscribe_document`,
+  `gui::watch_document`)
+  - `DocumentAfterClose`(대상 문서), `Quit`: 바로 닫는다
+  - `DocumentAfterSave`(대상 문서): 번호와 경로가 같은 문서가 아직 있는지 확인해(`hwp::document_open`), 다른
+    이름으로 저장해 경로가 바뀌었으면 닫는다. 문서를 읽으려고 하는 `SaveAs(…, "lock:false")`도 이 이벤트를
+    내지만 경로가 그대로라 닫지 않는다
+  - 이벤트 없이 한글이 사라진 경우(강제 종료 등)와 이벤트에 연결하지 못한 경우에 대비해 10초마다 열린
+    문서를 훑어, 대상 문서가 두 번 이어서 없거나 한글에 붙지 못하면 닫는다. 한글이 바빠 훑지 못한 것은
+    닫힌 것으로 치지 않는다
 - 저장하지 않은 새 문서를 처음 저장해 이름이 생긴 것은 닫힌 것이 아니다. 대상 문서의 경로가 비어 있었고
   같은 문서 번호로 이름이 생긴 문서가 있으면, 창을 그 이름에 다시 고정한다(`gui::rebind_document`): 창
   제목과 대상 문서를 바꾸고, 대화 칸의 글은 그대로 둔 채 대화 기록 파일을 새 이름의 것으로 옮겨 쓴다
@@ -299,6 +306,9 @@ unsafe가 필요한 기능은 이 프로젝트에 두지 않고 hwp_automation_r
 1. 글 넣기: `hwp.ext_text().insert_with_shape(text, &shape)`. 지금은 `CharShape::default()`(항목이 모두
    `None`)를 넘기고, 나중에 `hwp.ext_shape().current_char()`로 읽은 모양을 넘긴다. hwp_automation_rs의 아직 배포하지 않은 다음
    버전에 있다(로컬 path 의존성으로 씀)
+1. 한글 이벤트: `hwp.ext_events().subscribe(클로저)`(`HwpEvent`)와 `hwp_com::pump_pending_messages`. 이벤트는
+   연결한 스레드가 메시지를 처리할 때 전달된다. hwp_automation_rs의 아직 커밋하지 않은 작업본에 있다(로컬
+   path 의존성으로 씀)
 1. MCP 클라이언트: [rmcp](https://docs.rs/rmcp) 3.8(`client`, `transport-child-process`,
    `transport-streamable-http-client-reqwest`, `reqwest-native-tls`). rig-rmcp 0.44는 rmcp 2와 rig-agent를
    끌어오므로 쓰지 않는다. rustls(C 코드)를 피하려 native-tls를 쓴다

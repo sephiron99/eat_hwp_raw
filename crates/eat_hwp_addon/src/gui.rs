@@ -19,7 +19,8 @@
 //!     같은 문서·API로 돌아오면 다시 불러온다. 문서는 창을 열 때 정해지고(대상 문서), API 종류는 메인
 //!     창의 상태를 점검할 때 그 설정을 기준으로 바꾼다
 //! - 창은 처음 띄운 문서(대상 문서)에 고정된다. "보내기"는 한글에서 어느 탭을 보고 있든 그 문서를
-//!   읽고, 답도 그 문서에만 넣는다. 대상 문서가 닫히면 창도 닫는다(`bind_document`, `watch_document`)
+//!   읽고, 답도 그 문서에만 넣는다. 대상 문서가 닫히면 창도 닫는다(`bind_document`, `watch_document`).
+//!   닫힘은 한글의 이벤트(`DocumentAfterClose`, `DocumentAfterSave`, `Quit`)로 안다
 //! - "다른 열린 문서도 함께 보내기" 체크 칸: 켜면 한글에 열려 있는 다른 문서도 같은 형식으로 읽어 참고
 //!   문서로 함께 보낸다. 바꾸면 `settings.txt`에 남는다. "문서 고르기…" 버튼으로 보낼 문서를 고를 수
 //!   있다(고른 적이 없으면 모두 보낸다)
@@ -58,7 +59,9 @@ use crate::mcp;
 use crate::settings;
 use crate::workflow::{self, DocFormat};
 use anyhow::{Result, anyhow};
-use std::cell::RefCell;
+use hwp_com::ext::HwpEvent;
+use hwp_com::method::events::EventConnection;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -1084,8 +1087,11 @@ fn finish_on_ui(
     chat_save();
 }
 
-/// 대상 문서가 아직 열려 있는지 확인하는 간격.
-const WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+/// 한글이 보낸 이벤트를 받으려고 워커 스레드의 메시지를 처리하는 간격.
+const PUMP_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// 이벤트와 별도로 대상 문서가 아직 열려 있는지 훑어 보는 간격(이벤트 없이 한글이 사라진 경우 대비).
+const WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// 창을 대상 문서에 고정한다. 워커 스레드에서 한글에 붙어 대상 문서를 정하고(애드온이 넘긴 문서, 없으면
 /// 지금 활성 문서), UI 스레드에서 창 제목과 그 문서의 대화를 맞춘다. 그 뒤 같은 스레드에서 대상 문서를
@@ -1152,52 +1158,117 @@ fn rebind_document(saved: hwp::DocIdentity) {
     with_ui(|ui| ui.bound = Some(saved));
 }
 
+/// 한글이 보낸 이벤트 가운데 대상 문서에 관한 것. 이벤트 클로저가 적어 두고 [`watch_document`]가 읽는다.
+#[derive(Default)]
+struct DocSignals {
+    /// 대상 문서가 닫혔거나 한글이 끝났다.
+    closed: Cell<bool>,
+    /// 대상 문서가 저장됐다. 이름이 바뀌었는지 확인해야 한다.
+    saved: Cell<bool>,
+}
+
+/// 한글의 이벤트를 받아 대상 문서(`doc_id`)에 관한 것을 `signals`에 적는다
+/// (hwp_automation_rs의 `ExtEvents::subscribe`). 돌려받은 연결이 살아 있는 동안 받는다.
+///
+/// 이벤트는 이 함수를 부른 스레드가 메시지를 처리할 때 전달된다([`watch_document`]가 처리한다).
+/// - `DocumentAfterClose`(대상 문서), `Quit`: 닫힘
+/// - `DocumentAfterSave`(대상 문서): 저장됨. 다른 이름으로 저장했는지는 [`watch_document`]가 확인한다
+fn subscribe_document(
+    hwp: &hwp_com::HwpObject,
+    doc_id: i32,
+    signals: &Rc<DocSignals>,
+) -> Option<EventConnection> {
+    let signals = Rc::clone(signals);
+    let connection = hwp.ext_events().subscribe(move |event| match event {
+        HwpEvent::Quit => signals.closed.set(true),
+        HwpEvent::DocumentAfterClose { doc_id: id } if id == doc_id => signals.closed.set(true),
+        HwpEvent::DocumentAfterSave { doc_id: id } if id == doc_id => signals.saved.set(true),
+        _ => {}
+    });
+    match connection {
+        Ok(connection) => Some(connection),
+        Err(e) => {
+            tracing::warn!(error = %e, "한글 이벤트에 연결하지 못함. 주기적 확인만 한다");
+            None
+        }
+    }
+}
+
 /// 대상 문서(`bound`)가 한글에서 닫히면 창을 닫는다(워커 스레드, 창이 닫힐 때까지 돈다).
 ///
-/// [`WATCH_INTERVAL`]마다 열린 문서를 훑는다. 문서를 닫았거나 다른 이름으로 저장해 경로가 바뀌었으면
-/// 닫힌 것으로 본다. 한글이 꺼져 붙지 못하는 것도 닫힌 것이다. 두 번 이어서 그렇게 확인되면 창을
-/// 닫는다. 한글이 바빠(대화 상자 등) 훑지 못한 것은 닫힌 것으로 치지 않고 다시 붙어 본다.
+/// 한글의 이벤트로 안다([`subscribe_document`]). 이 스레드의 메시지를 [`PUMP_INTERVAL`]마다 처리해
+/// 이벤트를 받는다.
+/// - 대상 문서를 닫았거나 한글을 끝냈으면 바로 창을 닫는다
+/// - 대상 문서를 저장했으면 이름을 확인한다. 다른 이름으로 저장해 경로가 바뀌었으면 창을 닫고,
+///   저장하지 않은 새 문서를 처음 저장해 이름이 생긴 것이면 창을 그 이름으로 다시 고정한다
+///   ([`rebind_document`])
 ///
-/// 저장하지 않은 새 문서를 처음 저장해 이름이 생긴 것은 닫힌 것이 아니다. 같은 문서 번호로 이름이 생긴
-/// 문서가 있으면 창을 그 이름으로 다시 고정한다([`rebind_document`]).
+/// 이벤트 없이 한글이 사라지는 경우(강제 종료 등)와 이벤트에 연결하지 못한 경우에 대비해
+/// [`WATCH_INTERVAL`]마다 열린 문서를 훑어 본다. 두 번 이어서 대상 문서가 없거나 한글에 붙지 못하면
+/// 창을 닫는다. 한글이 바빠(대화 상자 등) 훑지 못한 것은 닫힌 것으로 치지 않고 다시 붙어 본다.
 fn watch_document(
     wnd: &gui::WindowMain,
     mut hwp: Option<hwp_com::HwpObject>,
     mut bound: hwp::DocIdentity,
 ) {
+    let signals = Rc::new(DocSignals::default());
+    let mut connection = hwp
+        .as_ref()
+        .and_then(|hwp| subscribe_document(hwp, bound.id, &signals));
     let mut gone = 0;
+    let mut checked = Instant::now();
     loop {
-        std::thread::sleep(WATCH_INTERVAL);
-        let mut open = match &hwp {
-            Some(hwp) => hwp::document_open(hwp, &bound),
-            None => Err(anyhow!("한글에 붙어 있지 않음")),
-        };
-        if let (Ok(false), Some(hwp), true) = (&open, &hwp, bound.full_name.is_empty())
-            && let Ok(Some(saved)) = hwp::document_by_id(hwp, bound.id)
-            && !saved.full_name.is_empty()
-        {
-            tracing::info!(doc_id = saved.id, doc = %saved.full_name, "새 문서가 저장돼 창을 그 이름에 다시 고정");
-            bound = saved.clone();
-            wnd.run_ui_thread(move || {
-                rebind_document(saved);
-                Ok(())
-            });
-            open = Ok(true);
+        std::thread::sleep(PUMP_INTERVAL);
+        // 쌓인 메시지를 처리한다. 이벤트 클로저는 이 안에서 불린다.
+        hwp_com::pump_pending_messages();
+        let saved = signals.saved.replace(false);
+        let mut closed = signals.closed.get();
+        if !closed && (saved || checked.elapsed() >= WATCH_INTERVAL) {
+            checked = Instant::now();
+            let mut open = match &hwp {
+                Some(hwp) => hwp::document_open(hwp, &bound),
+                None => Err(anyhow!("한글에 붙어 있지 않음")),
+            };
+            if let (Ok(false), Some(hwp), true) = (&open, &hwp, bound.full_name.is_empty())
+                && let Ok(Some(named)) = hwp::document_by_id(hwp, bound.id)
+                && !named.full_name.is_empty()
+            {
+                tracing::info!(doc_id = named.id, doc = %named.full_name, "새 문서가 저장돼 창을 그 이름에 다시 고정");
+                bound = named.clone();
+                wnd.run_ui_thread(move || {
+                    rebind_document(named);
+                    Ok(())
+                });
+                open = Ok(true);
+            }
+            match open {
+                Ok(true) => gone = 0,
+                // 저장 이벤트 뒤에 이름이 달라졌으면 다른 이름으로 저장한 것이다. 바로 닫는다.
+                Ok(false) if saved => closed = true,
+                Ok(false) => gone += 1,
+                Err(_) => match hwp::connect() {
+                    // 다시 붙었다. 이벤트도 다시 연결하고, 다음 차례에 훑어 본다.
+                    Ok(again) => {
+                        connection = subscribe_document(&again, bound.id, &signals);
+                        hwp = Some(again);
+                    }
+                    Err(_) => {
+                        connection = None;
+                        hwp = None;
+                        gone += 1;
+                    }
+                },
+            }
         }
-        match open {
-            Ok(true) => gone = 0,
-            Ok(false) => gone += 1,
-            Err(_) => match hwp::connect() {
-                // 다시 붙었다. 다음 차례에 훑어 본다.
-                Ok(again) => hwp = Some(again),
-                Err(_) => {
-                    hwp = None;
-                    gone += 1;
-                }
-            },
-        }
-        if gone >= 2 {
-            tracing::info!(doc_id = bound.id, doc = %bound.full_name, "대상 문서가 닫혀 창을 닫음");
+        if closed || gone >= 2 {
+            tracing::info!(
+                doc_id = bound.id,
+                doc = %bound.full_name,
+                by_event = closed,
+                "대상 문서가 닫혀 창을 닫음"
+            );
+            // 한글이 끝난 뒤에는 연결을 끊는 호출이 실패할 수 있으나 무시된다.
+            drop(connection);
             let wnd_ui = wnd.clone();
             wnd.run_ui_thread(move || {
                 wnd_ui.close();
